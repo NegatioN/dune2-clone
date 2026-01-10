@@ -17,6 +17,9 @@ TILE_SIZE     :: 32
 
 // --- Core Types ---
 
+Vec2  :: [2]f32
+IVec2 :: [2]int
+
 Direction :: enum {
 	None,
 	Up,
@@ -25,18 +28,55 @@ Direction :: enum {
 	Right,
 }
 
-GridPos :: struct {
-	x, y: int,
+AnimState :: enum {
+	Idle,
+	Moving,
+	Attacking,
 }
 
-// Generic Entity for tile-based movement
+TerrainType :: enum {
+	Sand,
+	Rock,
+	Spice,
+}
+
+Tile :: struct {
+	terrain:  TerrainType,
+	occupier: ^Entity, // The unit currently on this tile (Dune II rule: 1 unit per tile)
+}
+
+// Global Map Data
+MAP_WIDTH  :: 64
+MAP_HEIGHT :: 64
+game_map: [MAP_WIDTH * MAP_HEIGHT]Tile
+
+// Generic Entity
 Entity :: struct {
-	pos:         GridPos,  // Current logical grid position
-	target:      GridPos,  // Target grid position
-	lerp_t:      f32,      // Interpolation progress (0.0 to 1.0)
-	rotation:    f64,      // Visual rotation in degrees
-	current_dir: Direction,
+	// Spatial
+	pos:         Vec2,     // World position (pixels)
+	target_pos:  Vec2,     // Target world position
+	
+	// Visuals
 	tex:         ^sdl2.Texture,
+	rotation:    f64,
+	
+	// Animation
+	state:       AnimState,
+	frame_idx:   int,
+	frame_timer: f32,
+	anim_speed:  f32,      // Seconds per frame
+	
+	// Game Logic
+	current_dir: Direction,
+}
+
+get_anim_info :: proc(state: AnimState) -> (row: i32, num_frames: int) {
+	switch state {
+	case .Idle:      return 0, 1
+	case .Moving:    return 1, 4
+	case .Attacking: return 2, 2
+	}
+	return 0, 1
 }
 
 // Game Context
@@ -134,19 +174,30 @@ grid_to_screen :: proc(ctx: ^CTX, gx, gy: int) -> (x, y: i32) {
 }
 
 draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
-	// Linear interpolation for smooth movement
-	lerp_x := f32(entity.pos.x) + (f32(entity.target.x) - f32(entity.pos.x)) * entity.lerp_t
-	lerp_y := f32(entity.pos.y) + (f32(entity.target.y) - f32(entity.pos.y)) * entity.lerp_t
-	
-	screen_x := ctx.offset_x + i32(lerp_x * f32(TILE_SIZE))
-	screen_y := ctx.offset_y + i32(lerp_y * f32(TILE_SIZE))
+	// 1. Calculate Destination Rect (Screen Space)
+	screen_x := ctx.offset_x + i32(entity.pos.x)
+	screen_y := ctx.offset_y + i32(entity.pos.y)
 
 	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
 	
-	// Reset color mod before drawing
+	// 2. Calculate Source Rect (Animation Frame)
+	row, _ := get_anim_info(entity.state)
+	src_x := i32(entity.frame_idx) * TILE_SIZE
+	src_y := row * TILE_SIZE
+	
+	src := sdl2.Rect{x = src_x, y = src_y, w = TILE_SIZE, h = TILE_SIZE}
+
+	// 3. Draw
 	sdl2.SetTextureColorMod(entity.tex, 255, 255, 255)
 	
-	sdl2.RenderCopyEx(ctx.renderer, entity.tex, nil, &dst, entity.rotation, nil, .NONE)
+	// If texture is nil, we might want to draw a debug rect, but for now assuming valid texture
+	if entity.tex != nil {
+		sdl2.RenderCopyEx(ctx.renderer, entity.tex, &src, &dst, entity.rotation, nil, .NONE)
+	} else {
+		// Fallback debug draw
+		sdl2.SetRenderDrawColor(ctx.renderer, 255, 0, 0, 255)
+		sdl2.RenderDrawRect(ctx.renderer, &dst)
+	}
 }
 
 render_text :: proc(ctx: ^CTX, text: string, x, y: i32, color: sdl2.Color) {
