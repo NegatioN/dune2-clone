@@ -99,6 +99,7 @@ CTX :: struct {
 	
 	// Game Logic
 	selected_entity: ^Entity,
+	entities:        [dynamic]^Entity,
 	
 	// Map Data
 	map_width:    int,
@@ -282,19 +283,21 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int) {
 	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
 	e.target_pos = e.pos
 	e.tex = ctx.tileset // Using the same texture
-	e.base_sprite_pos = IVec2{11, 7} // Trying inverted coordinates to fit bounds
+	e.base_sprite_pos = IVec2{10, 7} // Trying inverted coordinates to fit bounds
 	e.state = .Idle
 	e.frame_idx = 0
 	e.anim_speed = 0.1
 	e.current_dir = .Up
 	
 	game_map[idx].occupier = e
+	append(&ctx.entities, e)
 }
 
 update_entity :: proc(e: ^Entity, dt: f32) {
 	// Simple movement logic: Lerp towards target
 	SPEED :: 100.0 // Pixels per second
-	
+
+	prev_grid_pos := world_to_grid(e.pos)
 	dist := linalg.distance(e.pos, e.target_pos)
 	if dist > 1.0 {
 		e.state = .Moving
@@ -302,8 +305,27 @@ update_entity :: proc(e: ^Entity, dt: f32) {
 		dir = linalg.normalize(dir)
 		e.pos += dir * SPEED * dt
 		
-		// Update logic grid position (ownership) - Simplified
-		// curr_grid := world_to_grid(e.pos)
+		// Update logic grid position (ownership)
+		new_grid_pos := world_to_grid(e.pos)
+		
+		// If we crossed into a new tile
+		if new_grid_pos != prev_grid_pos {
+			// Bounds check
+			if new_grid_pos.x >= 0 && new_grid_pos.x < MAP_WIDTH && 
+			   new_grid_pos.y >= 0 && new_grid_pos.y < MAP_HEIGHT {
+				   
+				// Clear old
+				old_idx := prev_grid_pos.y * MAP_WIDTH + prev_grid_pos.x
+				if game_map[old_idx].occupier == e {
+					game_map[old_idx].occupier = nil
+				}
+				
+				// Set new (Force overwrite for now, in reality check collision)
+				new_idx := new_grid_pos.y * MAP_WIDTH + new_grid_pos.x
+				game_map[new_idx].occupier = e
+			}
+		}
+		
 	} else {
 		e.pos = e.target_pos
 		e.state = .Idle
@@ -315,6 +337,44 @@ update_entity :: proc(e: ^Entity, dt: f32) {
 		e.frame_timer = 0
 		_, num_frames := get_anim_info(e.state)
 		e.frame_idx = (e.frame_idx + 1) % num_frames
+	}
+}
+
+// --- Input Handling ---
+
+handle_mouse_input :: proc(ctx: ^CTX, button: sdl2.MouseButtonEvent) {
+	world_pos := screen_to_world(ctx, button.x, button.y)
+	grid_pos := world_to_grid(world_pos)
+	
+	if button.button == sdl2.BUTTON_LEFT {
+		// Selection Logic: Check Entity Bounding Boxes
+		ctx.selected_entity = nil // Deselect by default
+		
+		for unit in ctx.entities {
+			unit_rect := sdl2.Rect{
+				x = i32(unit.pos.x),
+				y = i32(unit.pos.y),
+				w = TILE_SIZE,
+				h = TILE_SIZE,
+			}
+			
+			// Note: PointInRect expects Point, but our world_pos is relative to map.
+			// Since we calculated world_pos by subtracting offset, it represents 
+			// the pixel coordinate in the GAME WORLD.
+			// The unit.pos is also in GAME WORLD.
+			// So this comparison is correct.
+			mouse_p := sdl2.Point{x = i32(world_pos.x), y = i32(world_pos.y)}
+			if sdl2.PointInRect(&mouse_p, &unit_rect) {
+				ctx.selected_entity = unit
+				log.info("Selected Unit via Bounding Box at", world_pos)
+				break
+			}
+		}
+	} else if button.button == sdl2.BUTTON_RIGHT {
+		// Movement Logic
+		if ctx.selected_entity != nil {
+			ctx.selected_entity.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
+		}
 	}
 }
 
@@ -436,26 +496,7 @@ main :: proc() {
 					dune_ctx.should_close = true
 				}
 			case .MOUSEBUTTONDOWN:
-				world_pos := screen_to_world(&dune_ctx, e.button.x, e.button.y)
-				grid_pos := world_to_grid(world_pos)
-				
-				if e.button.button == sdl2.BUTTON_LEFT {
-					// Selection Logic
-					if grid_pos.x >= 0 && grid_pos.x < MAP_WIDTH && grid_pos.y >= 0 && grid_pos.y < MAP_HEIGHT {
-						tile := &game_map[grid_pos.y * MAP_WIDTH + grid_pos.x]
-						if tile.occupier != nil {
-							dune_ctx.selected_entity = tile.occupier
-							log.info("Selected Unit at", grid_pos)
-						} else {
-							dune_ctx.selected_entity = nil
-						}
-					}
-				} else if e.button.button == sdl2.BUTTON_RIGHT {
-					// Movement Logic
-					if dune_ctx.selected_entity != nil {
-						dune_ctx.selected_entity.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
-					}
-				}
+				handle_mouse_input(&dune_ctx, e.button)
 			}
 		}
 
@@ -489,13 +530,15 @@ main :: proc() {
 		
 		draw_map(&dune_ctx)
 		
-		// Draw Entities
+		// 1. Update Entities (Logic)
+		for e in dune_ctx.entities {
+			update_entity(e, dt)
+		}
+		
+		// 2. Draw Entities (Render) - Iterate map for rough Y-sorting or just to find visible
 		for i in 0..<len(game_map) {
 			if game_map[i].occupier != nil {
 				e := game_map[i].occupier
-				
-				// Update & Draw
-				update_entity(e, dt)
 				draw_entity(&dune_ctx, e)
 				
 				// Selection Box
