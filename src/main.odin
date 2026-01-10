@@ -319,11 +319,9 @@ update_entity :: proc(e: ^Entity, dt: f32) {
 			if new_grid_pos.x >= 0 && new_grid_pos.x < MAP_WIDTH && 
 			   new_grid_pos.y >= 0 && new_grid_pos.y < MAP_HEIGHT {
 				   
-				// Clear old
+				// Unconditionally clear the old tile to ensure no trails are left.
 				old_idx := prev_grid_pos.y * MAP_WIDTH + prev_grid_pos.x
-				if game_map[old_idx].occupier == e {
-					game_map[old_idx].occupier = nil
-				}
+				game_map[old_idx].occupier = nil
 				
 				// Set new (Force overwrite for now, in reality check collision)
 				new_idx := new_grid_pos.y * MAP_WIDTH + new_grid_pos.x
