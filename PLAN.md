@@ -23,6 +23,7 @@
 ## 4. Units & Behaviors
 - [x] Unit Selection (Single click, Box selection).
 - [x] Unit Movement (Basic direct movement).
+- [x] Unit Collision Detection (Basic blocking).
 - [ ] Pathfinding (A* or Flow Fields).
 - [x] Unit States (Idle, Move, Attack animation states).
 - [ ] Combat System (Range checks, Projectiles, Damage, Health).

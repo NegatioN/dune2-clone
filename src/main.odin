@@ -5,6 +5,7 @@ import "core:log"
 import "core:math"
 import "core:math/linalg"
 import "core:os"
+import "core:slice"
 import "core:strings"
 import "vendor:sdl2"
 import img "vendor:sdl2/image"
@@ -298,7 +299,7 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int) {
 	append(&ctx.entities, e)
 }
 
-update_entity :: proc(e: ^Entity, dt: f32) {
+update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 	// Simple movement logic: Lerp towards target
 	SPEED :: 100.0 // Pixels per second
 
@@ -308,24 +309,51 @@ update_entity :: proc(e: ^Entity, dt: f32) {
 		e.state = .Moving
 		dir := e.target_pos - e.pos
 		dir = linalg.normalize(dir)
-		e.pos += dir * SPEED * dt
 		
-		// Update logic grid position (ownership)
-		new_grid_pos := world_to_grid(e.pos)
-		
-		// If we crossed into a new tile
-		if new_grid_pos != prev_grid_pos {
-			// Bounds check
-			if new_grid_pos.x >= 0 && new_grid_pos.x < MAP_WIDTH && 
-			   new_grid_pos.y >= 0 && new_grid_pos.y < MAP_HEIGHT {
-				   
-				// Unconditionally clear the old tile to ensure no trails are left.
-				old_idx := prev_grid_pos.y * MAP_WIDTH + prev_grid_pos.x
-				game_map[old_idx].occupier = nil
-				
-				// Set new (Force overwrite for now, in reality check collision)
-				new_idx := new_grid_pos.y * MAP_WIDTH + new_grid_pos.x
-				game_map[new_idx].occupier = e
+		// Proposed movement
+		move_vec := dir * SPEED * dt
+		next_pos := e.pos + move_vec
+		next_grid_pos := world_to_grid(next_pos)
+
+		// Collision Detection (AABB)
+		collided := false
+		SIZE :: f32(TILE_SIZE)
+
+		for other in ctx.entities {
+			if other == e { continue } // Don't check against self
+			
+			// AABB Overlap Test
+			// R1: next_pos, SIZE
+			// R2: other.pos, SIZE
+			if next_pos.x < other.pos.x + SIZE &&
+			   next_pos.x + SIZE > other.pos.x &&
+			   next_pos.y < other.pos.y + SIZE &&
+			   next_pos.y + SIZE > other.pos.y {
+				collided = true
+				break
+			}
+		}
+
+		if !collided {
+			e.pos = next_pos
+			
+			// Update logic grid position (ownership)
+			new_grid_pos := world_to_grid(e.pos)
+			
+			// If we crossed into a new tile
+			if new_grid_pos != prev_grid_pos {
+				// Bounds check
+				if new_grid_pos.x >= 0 && new_grid_pos.x < MAP_WIDTH && 
+				   new_grid_pos.y >= 0 && new_grid_pos.y < MAP_HEIGHT {
+					   
+					// Unconditionally clear the old tile to ensure no trails are left.
+					old_idx := prev_grid_pos.y * MAP_WIDTH + prev_grid_pos.x
+					game_map[old_idx].occupier = nil
+					
+					// Set new
+					new_idx := new_grid_pos.y * MAP_WIDTH + new_grid_pos.x
+					game_map[new_idx].occupier = e
+				}
 			}
 		}
 		
@@ -506,6 +534,7 @@ main :: proc() {
 	
 	// Spawn Test Unit
 	spawn_unit(&dune_ctx, 10, 10)
+	spawn_unit(&dune_ctx, 12, 10)
 
 	last_count := sdl2.GetPerformanceCounter()
 	freq := sdl2.GetPerformanceFrequency()
@@ -541,25 +570,27 @@ main :: proc() {
 		
 		// 1. Update Entities (Logic)
 		for e in dune_ctx.entities {
-			update_entity(e, dt)
+			update_entity(&dune_ctx, e, dt)
 		}
 		
-		// 2. Draw Entities (Render) - Iterate map for rough Y-sorting or just to find visible
-		for i in 0..<len(game_map) {
-			if game_map[i].occupier != nil {
-				e := game_map[i].occupier
-				draw_entity(&dune_ctx, e)
+		// 2. Draw Entities (Render)
+		// Sort by Y for simple depth sorting
+		slice.sort_by(dune_ctx.entities[:], proc(i, j: ^Entity) -> bool {
+			return i.pos.y < j.pos.y
+		})
+
+		for e in dune_ctx.entities {
+			draw_entity(&dune_ctx, e)
+			
+			// Selection Box
+			if e == dune_ctx.selected_entity {
+				sx := dune_ctx.offset_x + i32(e.pos.x)
+				sy := dune_ctx.offset_y + i32(e.pos.y)
 				
-				// Selection Box
-				if e == dune_ctx.selected_entity {
-					sx := dune_ctx.offset_x + i32(e.pos.x)
-					sy := dune_ctx.offset_y + i32(e.pos.y)
-					
-					// Draw slightly larger box
-					r := sdl2.Rect{x=sx, y=sy, w=TILE_SIZE, h=TILE_SIZE}
-					sdl2.SetRenderDrawColor(dune_ctx.renderer, 0, 255, 0, 255) // Green
-					sdl2.RenderDrawRect(dune_ctx.renderer, &r)
-				}
+				// Draw slightly larger box
+				r := sdl2.Rect{x=sx, y=sy, w=TILE_SIZE, h=TILE_SIZE}
+				sdl2.SetRenderDrawColor(dune_ctx.renderer, 0, 255, 0, 255) // Green
+				sdl2.RenderDrawRect(dune_ctx.renderer, &r)
 			}
 		}
 		
