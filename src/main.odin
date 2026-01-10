@@ -3,6 +3,7 @@ package main
 import "core:fmt"
 import "core:log"
 import "core:math"
+import "core:math/linalg"
 import "core:os"
 import "core:strings"
 import "vendor:sdl2"
@@ -66,6 +67,7 @@ Entity :: struct {
 	// Visuals
 	tex:         ^sdl2.Texture,
 	rotation:    f64,
+	base_sprite_pos: IVec2, // Base coordinate in tileset (e.g. {7, 11} for Tank)
 	
 	// Animation
 	state:       AnimState,
@@ -77,11 +79,12 @@ Entity :: struct {
 	current_dir: Direction,
 }
 
-get_anim_info :: proc(state: AnimState) -> (row: i32, num_frames: int) {
+get_anim_info :: proc(state: AnimState) -> (row_offset: i32, num_frames: int) {
+	// Simple offset from base position
 	switch state {
 	case .Idle:      return 0, 1
-	case .Moving:    return 1, 4
-	case .Attacking: return 2, 2
+	case .Moving:    return 0, 1 // For now, reuse idle frame as we don't know moving frames layout
+	case .Attacking: return 0, 1
 	}
 	return 0, 1
 }
@@ -92,6 +95,10 @@ CTX :: struct {
 	renderer:     ^sdl2.Renderer,
 	font:         ^ttf.Font,
 	tileset:      ^sdl2.Texture,
+	units_tex:    ^sdl2.Texture, // New texture for units
+	
+	// Game Logic
+	selected_entity: ^Entity,
 	
 	// Map Data
 	map_width:    int,
@@ -111,6 +118,7 @@ init_sdl :: proc(ctx: ^CTX) -> bool {
 		log.errorf("SDL2 Init failed: %s", sdl2.GetError())
 		return false
 	}
+// ... (rest of init_sdl is same) ...
 
 	init_flags := img.Init(img.INIT_PNG | img.INIT_JPG)
 	if .PNG not_in init_flags {
@@ -230,7 +238,7 @@ draw_map :: proc(ctx: ^CTX) {
 	end_y   = math.clamp(end_y,   0, MAP_HEIGHT)
 
 	SRC_SIZE    :: 32
-	SRC_PADDING :: 1
+	SRC_PADDING :: 0
 
 	for y in start_y..<end_y {
 		for x in start_x..<end_x {
@@ -262,6 +270,54 @@ draw_map :: proc(ctx: ^CTX) {
 	}
 }
 
+// --- Entities ---
+
+spawn_unit :: proc(ctx: ^CTX, x, y: int) {
+	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
+	
+	idx := y * MAP_WIDTH + x
+	if game_map[idx].occupier != nil { return } // Tile occupied
+
+	e := new(Entity)
+	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
+	e.target_pos = e.pos
+	e.tex = ctx.tileset // Using the same texture
+	e.base_sprite_pos = IVec2{11, 7} // Trying inverted coordinates to fit bounds
+	e.state = .Idle
+	e.frame_idx = 0
+	e.anim_speed = 0.1
+	e.current_dir = .Up
+	
+	game_map[idx].occupier = e
+}
+
+update_entity :: proc(e: ^Entity, dt: f32) {
+	// Simple movement logic: Lerp towards target
+	SPEED :: 100.0 // Pixels per second
+	
+	dist := linalg.distance(e.pos, e.target_pos)
+	if dist > 1.0 {
+		e.state = .Moving
+		dir := e.target_pos - e.pos
+		dir = linalg.normalize(dir)
+		e.pos += dir * SPEED * dt
+		
+		// Update logic grid position (ownership) - Simplified
+		// curr_grid := world_to_grid(e.pos)
+	} else {
+		e.pos = e.target_pos
+		e.state = .Idle
+	}
+	
+	// Animation Tick
+	e.frame_timer += dt
+	if e.frame_timer >= e.anim_speed {
+		e.frame_timer = 0
+		_, num_frames := get_anim_info(e.state)
+		e.frame_idx = (e.frame_idx + 1) % num_frames
+	}
+}
+
 // --- Utilities ---
 
 screen_to_world :: proc(ctx: ^CTX, screen_x, screen_y: i32) -> Vec2 {
@@ -284,9 +340,13 @@ draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
 	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
 	
 	// 2. Calculate Source Rect (Animation Frame)
-	row, _ := get_anim_info(entity.state)
-	src_x := i32(entity.frame_idx) * TILE_SIZE
-	src_y := row * TILE_SIZE
+	row_offset, _ := get_anim_info(entity.state)
+	
+	// Base X + Animation Frame Offset
+	src_x := i32(entity.base_sprite_pos.x) * TILE_SIZE + i32(entity.frame_idx) * TILE_SIZE
+	
+	// Base Y + Animation State Row Offset
+	src_y := (i32(entity.base_sprite_pos.y) + row_offset) * TILE_SIZE
 	
 	src := sdl2.Rect{x = src_x, y = src_y, w = TILE_SIZE, h = TILE_SIZE}
 
@@ -296,11 +356,11 @@ draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
 	// If texture is nil, we might want to draw a debug rect, but for now assuming valid texture
 	if entity.tex != nil {
 		sdl2.RenderCopyEx(ctx.renderer, entity.tex, &src, &dst, entity.rotation, nil, .NONE)
-	} else {
-		// Fallback debug draw
-		sdl2.SetRenderDrawColor(ctx.renderer, 255, 0, 0, 255)
-		sdl2.RenderDrawRect(ctx.renderer, &dst)
 	}
+	
+	// DEBUG: Draw Red Box outline to verify position
+	sdl2.SetRenderDrawColor(ctx.renderer, 255, 0, 0, 255)
+	sdl2.RenderDrawRect(ctx.renderer, &dst)
 }
 
 render_text :: proc(ctx: ^CTX, text: string, x, y: i32, color: sdl2.Color) {
@@ -335,9 +395,13 @@ main :: proc() {
 	// Load Assets
 	dune_ctx.tileset = load_texture(&dune_ctx, "assets/tileset2_32x32.png")
 	if dune_ctx.tileset == nil { return }
+	dune_ctx.units_tex = dune_ctx.tileset
 	
 	// Init Map
 	init_map(&dune_ctx)
+	
+	// Spawn Test Unit
+	spawn_unit(&dune_ctx, 10, 10)
 
 	last_count := sdl2.GetPerformanceCounter()
 	freq := sdl2.GetPerformanceFrequency()
@@ -349,7 +413,7 @@ main :: proc() {
 		current_count := sdl2.GetPerformanceCounter()
 		dt_raw := f64(current_count - last_count) / f64(freq)
 		last_count = current_count
-		// dt := f32(dt_raw)
+		dt := f32(dt_raw)
 		
 		// FPS Counter logic
 		frame_counter += 1
@@ -372,11 +436,25 @@ main :: proc() {
 					dune_ctx.should_close = true
 				}
 			case .MOUSEBUTTONDOWN:
+				world_pos := screen_to_world(&dune_ctx, e.button.x, e.button.y)
+				grid_pos := world_to_grid(world_pos)
+				
 				if e.button.button == sdl2.BUTTON_LEFT {
-					world_pos := screen_to_world(&dune_ctx, e.button.x, e.button.y)
-					grid_pos := world_to_grid(world_pos)
-					log.infof("Click at Screen(%d, %d) -> World(%.1f, %.1f) -> Grid(%d, %d)", 
-						e.button.x, e.button.y, world_pos.x, world_pos.y, grid_pos.x, grid_pos.y)
+					// Selection Logic
+					if grid_pos.x >= 0 && grid_pos.x < MAP_WIDTH && grid_pos.y >= 0 && grid_pos.y < MAP_HEIGHT {
+						tile := &game_map[grid_pos.y * MAP_WIDTH + grid_pos.x]
+						if tile.occupier != nil {
+							dune_ctx.selected_entity = tile.occupier
+							log.info("Selected Unit at", grid_pos)
+						} else {
+							dune_ctx.selected_entity = nil
+						}
+					}
+				} else if e.button.button == sdl2.BUTTON_RIGHT {
+					// Movement Logic
+					if dune_ctx.selected_entity != nil {
+						dune_ctx.selected_entity.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
+					}
 				}
 			}
 		}
@@ -411,7 +489,27 @@ main :: proc() {
 		
 		draw_map(&dune_ctx)
 		
-		// Draw Entities would go here
+		// Draw Entities
+		for i in 0..<len(game_map) {
+			if game_map[i].occupier != nil {
+				e := game_map[i].occupier
+				
+				// Update & Draw
+				update_entity(e, dt)
+				draw_entity(&dune_ctx, e)
+				
+				// Selection Box
+				if e == dune_ctx.selected_entity {
+					sx := dune_ctx.offset_x + i32(e.pos.x)
+					sy := dune_ctx.offset_y + i32(e.pos.y)
+					
+					// Draw slightly larger box
+					r := sdl2.Rect{x=sx, y=sy, w=TILE_SIZE, h=TILE_SIZE}
+					sdl2.SetRenderDrawColor(dune_ctx.renderer, 0, 255, 0, 255) // Green
+					sdl2.RenderDrawRect(dune_ctx.renderer, &r)
+				}
+			}
+		}
 		
 		draw_minimap(&dune_ctx)
 		
