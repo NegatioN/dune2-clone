@@ -132,9 +132,11 @@ init_sdl :: proc(ctx: ^CTX) -> bool {
 		return false
 	}
 
+	sdl2.SetHint(sdl2.HINT_RENDER_SCALE_QUALITY, "nearest")
+
 	ctx.window = sdl2.CreateWindow(WINDOW_TITLE,
 		sdl2.WINDOWPOS_CENTERED, sdl2.WINDOWPOS_CENTERED,
-		WINDOW_WIDTH, WINDOW_HEIGHT, sdl2.WINDOW_SHOWN)
+		WINDOW_WIDTH, WINDOW_HEIGHT, sdl2.WINDOW_SHOWN | sdl2.WINDOW_FULLSCREEN_DESKTOP)
 	if ctx.window == nil {
 		log.errorf("Window creation failed: %s", sdl2.GetError())
 		return false
@@ -146,6 +148,9 @@ init_sdl :: proc(ctx: ^CTX) -> bool {
 		log.errorf("Renderer creation failed: %s", sdl2.GetError())
 		return false
 	}
+	
+	// Set Logical Size for automatic upscaling
+	sdl2.RenderSetLogicalSize(ctx.renderer, WINDOW_WIDTH, WINDOW_HEIGHT)
 
 	return true
 }
@@ -229,8 +234,8 @@ draw_map :: proc(ctx: ^CTX) {
 	// Only draw visible tiles
 	start_x := (-ctx.offset_x) / TILE_SIZE
 	start_y := (-ctx.offset_y) / TILE_SIZE
-	end_x   := start_x + (WINDOW_WIDTH / TILE_SIZE) + 1
-	end_y   := start_y + (WINDOW_HEIGHT / TILE_SIZE) + 1
+	end_x   := start_x + (WINDOW_WIDTH / TILE_SIZE) + 2
+	end_y   := start_y + (WINDOW_HEIGHT / TILE_SIZE) + 2
 
 	// Clamp to map bounds
 	start_x = math.clamp(start_x, 0, MAP_WIDTH)
