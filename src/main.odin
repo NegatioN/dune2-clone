@@ -15,6 +15,12 @@ WINDOW_WIDTH  :: i32(800)
 WINDOW_HEIGHT :: i32(600)
 TILE_SIZE     :: 32
 
+MINIMAP_SIZE  :: 128
+MINIMAP_PAD   :: 10
+MINIMAP_X     :: WINDOW_WIDTH - MINIMAP_SIZE - MINIMAP_PAD
+MINIMAP_Y     :: WINDOW_HEIGHT - MINIMAP_SIZE - MINIMAP_PAD
+MINIMAP_SCALE :: 2 // 1 tile = 2x2 pixels
+
 // --- Core Types ---
 
 Vec2  :: [2]f32
@@ -42,7 +48,8 @@ TerrainType :: enum {
 
 Tile :: struct {
 	terrain:  TerrainType,
-	occupier: ^Entity, // The unit currently on this tile (Dune II rule: 1 unit per tile)
+	tile_id:  int,      // Index in the tileset texture (Column N)
+	occupier: ^Entity,
 }
 
 // Global Map Data
@@ -84,6 +91,7 @@ CTX :: struct {
 	window:       ^sdl2.Window,
 	renderer:     ^sdl2.Renderer,
 	font:         ^ttf.Font,
+	tileset:      ^sdl2.Texture,
 	
 	// Map Data
 	map_width:    int,
@@ -167,7 +175,102 @@ cleanup :: proc(ctx: ^CTX) {
 	sdl2.Quit()
 }
 
+// --- Map Logic ---
+
+init_map :: proc(ctx: ^CTX) {
+	data, ok := os.read_entire_file("assets/level.dat")
+	if !ok {
+		log.error("Failed to load assets/level.dat")
+		return
+	}
+	defer delete(data)
+
+	x, y := 0, 0
+	for b in data {
+		if b == '\n' || b == '\r' {
+			if x > 0 { // Only advance Y if we actually read a line
+				y += 1
+				x = 0
+			}
+			continue
+		}
+		
+		if x >= MAP_WIDTH || y >= MAP_HEIGHT { continue }
+
+		// '1' (49) -> Index 0
+		// '2' (50) -> Index 1
+		tile_idx := int(b) - 49
+		if tile_idx < 0 { tile_idx = 0 }
+
+		idx := y * MAP_WIDTH + x
+		game_map[idx].tile_id = tile_idx
+		
+		// Set logical terrain type based on visual index (simplified mapping)
+		if tile_idx == 0 { game_map[idx].terrain = .Sand }
+		else { game_map[idx].terrain = .Rock }
+
+		x += 1
+	}
+	log.info("Map loaded successfully.")
+}
+
+draw_map :: proc(ctx: ^CTX) {
+	if ctx.tileset == nil { return }
+
+	// Only draw visible tiles
+	start_x := (-ctx.offset_x) / TILE_SIZE
+	start_y := (-ctx.offset_y) / TILE_SIZE
+	end_x   := start_x + (WINDOW_WIDTH / TILE_SIZE) + 1
+	end_y   := start_y + (WINDOW_HEIGHT / TILE_SIZE) + 1
+
+	// Clamp to map bounds
+	start_x = math.clamp(start_x, 0, MAP_WIDTH)
+	start_y = math.clamp(start_y, 0, MAP_HEIGHT)
+	end_x   = math.clamp(end_x,   0, MAP_WIDTH)
+	end_y   = math.clamp(end_y,   0, MAP_HEIGHT)
+
+	SRC_SIZE    :: 32
+	SRC_PADDING :: 1
+
+	for y in start_y..<end_y {
+		for x in start_x..<end_x {
+			tile := &game_map[y * MAP_WIDTH + x]
+			
+			// Calculate Source Rect from Tile Index
+			// Row 0, Column N
+			src_x := i32(tile.tile_id) * (SRC_SIZE + SRC_PADDING)
+			src_y := i32(0) // Specified as Row 0
+
+			src := sdl2.Rect{
+				x = src_x,
+				y = src_y,
+				w = SRC_SIZE,
+				h = SRC_SIZE,
+			}
+
+			// Destination Rect (Screen Space)
+			dst_x, dst_y := grid_to_screen(ctx, int(x), int(y))
+			dst := sdl2.Rect{
+				x = dst_x,
+				y = dst_y,
+				w = TILE_SIZE,
+				h = TILE_SIZE,
+			}
+
+			sdl2.RenderCopy(ctx.renderer, ctx.tileset, &src, &dst)
+		}
+	}
+}
+
 // --- Utilities ---
+
+screen_to_world :: proc(ctx: ^CTX, screen_x, screen_y: i32) -> Vec2 {
+	return Vec2{f32(screen_x - ctx.offset_x), f32(screen_y - ctx.offset_y)}
+}
+
+world_to_grid :: proc(world_pos: Vec2) -> IVec2 {
+	return IVec2{int(world_pos.x) / TILE_SIZE, int(world_pos.y) / TILE_SIZE}
+}
 
 grid_to_screen :: proc(ctx: ^CTX, gx, gy: int) -> (x, y: i32) {
 	return ctx.offset_x + i32(gx) * TILE_SIZE, ctx.offset_y + i32(gy) * TILE_SIZE
@@ -229,6 +332,13 @@ main :: proc() {
 	if !init_sdl(&dune_ctx) { return }
 	defer cleanup(&dune_ctx)
 
+	// Load Assets
+	dune_ctx.tileset = load_texture(&dune_ctx, "assets/tileset2_32x32.png")
+	if dune_ctx.tileset == nil { return }
+	
+	// Init Map
+	init_map(&dune_ctx)
+
 	last_count := sdl2.GetPerformanceCounter()
 	freq := sdl2.GetPerformanceFrequency()
 	
@@ -261,12 +371,116 @@ main :: proc() {
 				if e.key.keysym.sym == .ESCAPE {
 					dune_ctx.should_close = true
 				}
+			case .MOUSEBUTTONDOWN:
+				if e.button.button == sdl2.BUTTON_LEFT {
+					world_pos := screen_to_world(&dune_ctx, e.button.x, e.button.y)
+					grid_pos := world_to_grid(world_pos)
+					log.infof("Click at Screen(%d, %d) -> World(%.1f, %.1f) -> Grid(%d, %d)", 
+						e.button.x, e.button.y, world_pos.x, world_pos.y, grid_pos.x, grid_pos.y)
+				}
 			}
 		}
 
-		// Clear Screen (Dune 2 sand color-ish?)
-		sdl2.SetRenderDrawColor(dune_ctx.renderer, 194, 125, 60, 255)
+		// Camera Panning (Arrow Keys)
+		keys := sdl2.GetKeyboardState(nil)
+		PAN_SPEED :: 8
+
+		if keys[sdl2.Scancode.RIGHT] > 0 {
+			dune_ctx.offset_x -= PAN_SPEED
+		}
+		if keys[sdl2.Scancode.LEFT] > 0 {
+			dune_ctx.offset_x += PAN_SPEED
+		}
+		if keys[sdl2.Scancode.DOWN] > 0 {
+			dune_ctx.offset_y -= PAN_SPEED
+		}
+		if keys[sdl2.Scancode.UP] > 0 {
+			dune_ctx.offset_y += PAN_SPEED
+		}
+
+		// Clamp Camera
+		min_offset_x := -(i32(MAP_WIDTH) * TILE_SIZE - WINDOW_WIDTH)
+		min_offset_y := -(i32(MAP_HEIGHT) * TILE_SIZE - WINDOW_HEIGHT)
+
+		dune_ctx.offset_x = math.clamp(dune_ctx.offset_x, min_offset_x, 0)
+		dune_ctx.offset_y = math.clamp(dune_ctx.offset_y, min_offset_y, 0)
+
+		// Clear Screen
+		sdl2.SetRenderDrawColor(dune_ctx.renderer, 0, 0, 0, 255)
 		sdl2.RenderClear(dune_ctx.renderer)
+		
+		draw_map(&dune_ctx)
+		
+		// Draw Entities would go here
+		
+		draw_minimap(&dune_ctx)
+		
 		sdl2.RenderPresent(dune_ctx.renderer)
 	}
+}
+
+// --- Minimap ---
+
+draw_minimap :: proc(ctx: ^CTX) {
+	// 1. Draw Background
+	bg_rect := sdl2.Rect{
+		x = MINIMAP_X,
+		y = MINIMAP_Y,
+		w = MINIMAP_SIZE,
+		h = MINIMAP_SIZE,
+	}
+	sdl2.SetRenderDrawColor(ctx.renderer, 0, 0, 0, 255)
+	sdl2.RenderFillRect(ctx.renderer, &bg_rect)
+	
+	// 2. Draw Terrain & Units (Simplified)
+	// For loop over map data could go here.
+	// Since we don't initialize the map with data yet, this will just be black.
+	// But let's verify bounds: 64 tiles * 2 scale = 128 pixels. Perfect fit.
+	
+	for y in 0..<MAP_HEIGHT {
+		for x in 0..<MAP_WIDTH {
+			tile := game_map[y * MAP_WIDTH + x]
+			
+			// Color based on terrain or unit
+			r, g, b: u8
+			if tile.occupier != nil {
+				r, g, b = 0, 0, 255 // Blue for units
+			} else {
+				switch tile.terrain {
+				case .Sand:  r, g, b = 194, 125, 60
+				case .Rock:  r, g, b = 80, 80, 80
+				case .Spice: r, g, b = 255, 140, 0
+				}
+			}
+			
+			sdl2.SetRenderDrawColor(ctx.renderer, r, g, b, 255)
+			pixel_rect := sdl2.Rect{
+				x = MINIMAP_X + i32(x) * MINIMAP_SCALE,
+				y = MINIMAP_Y + i32(y) * MINIMAP_SCALE,
+				w = MINIMAP_SCALE,
+				h = MINIMAP_SCALE,
+			}
+			sdl2.RenderFillRect(ctx.renderer, &pixel_rect)
+		}
+	}
+	
+	// 3. Draw Viewport Rect
+	// Camera offset is typically negative (moving right means offset becomes negative).
+	// Viewport X on Map (Tiles) = (-offset_x) / TILE_SIZE
+	
+	view_x_grid := f32(-ctx.offset_x) / f32(TILE_SIZE)
+	view_y_grid := f32(-ctx.offset_y) / f32(TILE_SIZE)
+	
+	view_w_grid := f32(WINDOW_WIDTH) / f32(TILE_SIZE)
+	view_h_grid := f32(WINDOW_HEIGHT) / f32(TILE_SIZE)
+	
+	view_rect := sdl2.Rect{
+		x = MINIMAP_X + i32(view_x_grid * f32(MINIMAP_SCALE)),
+		y = MINIMAP_Y + i32(view_y_grid * f32(MINIMAP_SCALE)),
+		w = i32(view_w_grid * f32(MINIMAP_SCALE)),
+		h = i32(view_h_grid * f32(MINIMAP_SCALE)),
+	}
+	
+	sdl2.SetRenderDrawColor(ctx.renderer, 255, 255, 255, 255) // White box
+	sdl2.RenderDrawRect(ctx.renderer, &view_rect)
 }
