@@ -340,41 +340,82 @@ update_entity :: proc(e: ^Entity, dt: f32) {
 	}
 }
 
-// --- Input Handling ---
+// --- Main Input Handling ---
 
-handle_mouse_input :: proc(ctx: ^CTX, button: sdl2.MouseButtonEvent) {
-	world_pos := screen_to_world(ctx, button.x, button.y)
-	grid_pos := world_to_grid(world_pos)
+handle_events :: proc(ctx: ^CTX) {
+	e: sdl2.Event
+	for sdl2.PollEvent(&e) {
+		#partial switch e.type {
+		case .QUIT:
+			ctx.should_close = true
+		case .KEYDOWN:
+			if e.key.keysym.sym == .ESCAPE {
+				ctx.should_close = true
+			}
+		case .MOUSEBUTTONDOWN:
+			world_pos := screen_to_world(ctx, e.button.x, e.button.y)
+			if e.button.button == sdl2.BUTTON_LEFT {
+				handle_selection(ctx, world_pos)
+			} else if e.button.button == sdl2.BUTTON_RIGHT {
+				grid_pos := world_to_grid(world_pos)
+				handle_movement(ctx, grid_pos)
+			}
+		}
+	}
+}
+
+handle_camera :: proc(ctx: ^CTX) {
+	keys := sdl2.GetKeyboardState(nil)
+	PAN_SPEED :: 8
+
+	if keys[sdl2.Scancode.RIGHT] > 0 {
+		ctx.offset_x -= PAN_SPEED
+	}
+	if keys[sdl2.Scancode.LEFT] > 0 {
+		ctx.offset_x += PAN_SPEED
+	}
+	if keys[sdl2.Scancode.DOWN] > 0 {
+		ctx.offset_y -= PAN_SPEED
+	}
+	if keys[sdl2.Scancode.UP] > 0 {
+		ctx.offset_y += PAN_SPEED
+	}
+
+	// Clamp Camera
+	min_offset_x := -(i32(MAP_WIDTH) * TILE_SIZE - WINDOW_WIDTH)
+	min_offset_y := -(i32(MAP_HEIGHT) * TILE_SIZE - WINDOW_HEIGHT)
+
+	ctx.offset_x = math.clamp(ctx.offset_x, min_offset_x, 0)
+	ctx.offset_y = math.clamp(ctx.offset_y, min_offset_y, 0)
+}
+
+// --- Specific Input Handlers ---
+
+handle_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
+	ctx.selected_entity = nil // Deselect by default
 	
-	if button.button == sdl2.BUTTON_LEFT {
-		// Selection Logic: Check Entity Bounding Boxes
-		ctx.selected_entity = nil // Deselect by default
+	mouse_p := sdl2.Point{x = i32(world_pos.x), y = i32(world_pos.y)}
+	
+	for unit in ctx.entities {
+		unit_rect := sdl2.Rect{
+			x = i32(unit.pos.x),
+			y = i32(unit.pos.y),
+			w = TILE_SIZE,
+			h = TILE_SIZE,
+		}
 		
-		for unit in ctx.entities {
-			unit_rect := sdl2.Rect{
-				x = i32(unit.pos.x),
-				y = i32(unit.pos.y),
-				w = TILE_SIZE,
-				h = TILE_SIZE,
-			}
-			
-			// Note: PointInRect expects Point, but our world_pos is relative to map.
-			// Since we calculated world_pos by subtracting offset, it represents 
-			// the pixel coordinate in the GAME WORLD.
-			// The unit.pos is also in GAME WORLD.
-			// So this comparison is correct.
-			mouse_p := sdl2.Point{x = i32(world_pos.x), y = i32(world_pos.y)}
-			if sdl2.PointInRect(&mouse_p, &unit_rect) {
-				ctx.selected_entity = unit
-				log.info("Selected Unit via Bounding Box at", world_pos)
-				break
-			}
+		if sdl2.PointInRect(&mouse_p, &unit_rect) {
+			ctx.selected_entity = unit
+			log.info("Selected Unit via Bounding Box at", world_pos)
+			break
 		}
-	} else if button.button == sdl2.BUTTON_RIGHT {
-		// Movement Logic
-		if ctx.selected_entity != nil {
-			ctx.selected_entity.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
-		}
+	}
+}
+
+handle_movement :: proc(ctx: ^CTX, grid_pos: IVec2) {
+	if ctx.selected_entity != nil {
+		ctx.selected_entity.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
+		log.info("Moving Unit to Grid", grid_pos)
 	}
 }
 
@@ -419,8 +460,8 @@ draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
 	}
 	
 	// DEBUG: Draw Red Box outline to verify position
-	sdl2.SetRenderDrawColor(ctx.renderer, 255, 0, 0, 255)
-	sdl2.RenderDrawRect(ctx.renderer, &dst)
+	//sdl2.SetRenderDrawColor(ctx.renderer, 255, 0, 0, 255)
+	//sdl2.RenderDrawRect(ctx.renderer, &dst)
 }
 
 render_text :: proc(ctx: ^CTX, text: string, x, y: i32, color: sdl2.Color) {
@@ -485,44 +526,9 @@ main :: proc() {
 			log.info("FPS:", dune_ctx.current_fps)
 		}
 
-		// Basic Input Processing
-		e: sdl2.Event
-		for sdl2.PollEvent(&e) {
-			#partial switch e.type {
-			case .QUIT:
-				dune_ctx.should_close = true
-			case .KEYDOWN:
-				if e.key.keysym.sym == .ESCAPE {
-					dune_ctx.should_close = true
-				}
-			case .MOUSEBUTTONDOWN:
-				handle_mouse_input(&dune_ctx, e.button)
-			}
-		}
-
-		// Camera Panning (Arrow Keys)
-		keys := sdl2.GetKeyboardState(nil)
-		PAN_SPEED :: 8
-
-		if keys[sdl2.Scancode.RIGHT] > 0 {
-			dune_ctx.offset_x -= PAN_SPEED
-		}
-		if keys[sdl2.Scancode.LEFT] > 0 {
-			dune_ctx.offset_x += PAN_SPEED
-		}
-		if keys[sdl2.Scancode.DOWN] > 0 {
-			dune_ctx.offset_y -= PAN_SPEED
-		}
-		if keys[sdl2.Scancode.UP] > 0 {
-			dune_ctx.offset_y += PAN_SPEED
-		}
-
-		// Clamp Camera
-		min_offset_x := -(i32(MAP_WIDTH) * TILE_SIZE - WINDOW_WIDTH)
-		min_offset_y := -(i32(MAP_HEIGHT) * TILE_SIZE - WINDOW_HEIGHT)
-
-		dune_ctx.offset_x = math.clamp(dune_ctx.offset_x, min_offset_x, 0)
-		dune_ctx.offset_y = math.clamp(dune_ctx.offset_y, min_offset_y, 0)
+		// Input Handling
+		handle_events(&dune_ctx)
+		handle_camera(&dune_ctx)
 
 		// Clear Screen
 		sdl2.SetRenderDrawColor(dune_ctx.renderer, 0, 0, 0, 255)
@@ -560,8 +566,6 @@ main :: proc() {
 	}
 }
 
-// --- Minimap ---
-
 draw_minimap :: proc(ctx: ^CTX) {
 	// 1. Draw Background
 	bg_rect := sdl2.Rect{
@@ -573,11 +577,7 @@ draw_minimap :: proc(ctx: ^CTX) {
 	sdl2.SetRenderDrawColor(ctx.renderer, 0, 0, 0, 255)
 	sdl2.RenderFillRect(ctx.renderer, &bg_rect)
 	
-	// 2. Draw Terrain & Units (Simplified)
-	// For loop over map data could go here.
-	// Since we don't initialize the map with data yet, this will just be black.
-	// But let's verify bounds: 64 tiles * 2 scale = 128 pixels. Perfect fit.
-	
+	// 2. Draw Terrain & Units
 	for y in 0..<MAP_HEIGHT {
 		for x in 0..<MAP_WIDTH {
 			tile := game_map[y * MAP_WIDTH + x]
