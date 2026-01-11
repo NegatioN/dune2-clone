@@ -99,8 +99,13 @@ CTX :: struct {
 	units_tex:    ^sdl2.Texture, // New texture for units
 	
 	// Game Logic
-	selected_entity: ^Entity,
-	entities:        [dynamic]^Entity,
+	selected_entities: [dynamic]^Entity,
+	entities:          [dynamic]^Entity,
+	
+	// Selection State
+	is_dragging:       bool,
+	drag_start:        Vec2,
+	current_mouse_pos: Vec2,
 	
 	// Map Data
 	map_width:    int,
@@ -185,6 +190,8 @@ cleanup :: proc(ctx: ^CTX) {
 	if ctx.window != nil {
 		sdl2.DestroyWindow(ctx.window)
 	}
+	delete(ctx.selected_entities)
+	delete(ctx.entities)
 	ttf.Quit()
 	img.Quit()
 	sdl2.Quit()
@@ -313,22 +320,14 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 		// Proposed movement
 		move_vec := dir * SPEED * dt
 		next_pos := e.pos + move_vec
-		next_grid_pos := world_to_grid(next_pos)
 
 		// Collision Detection (AABB)
 		collided := false
-		SIZE :: f32(TILE_SIZE)
-
+		
 		for other in ctx.entities {
 			if other == e { continue } // Don't check against self
 			
-			// AABB Overlap Test
-			// R1: next_pos, SIZE
-			// R2: other.pos, SIZE
-			if next_pos.x < other.pos.x + SIZE &&
-			   next_pos.x + SIZE > other.pos.x &&
-			   next_pos.y < other.pos.y + SIZE &&
-			   next_pos.y + SIZE > other.pos.y {
+			if check_collision(next_pos, other.pos) {
 				collided = true
 				break
 			}
@@ -386,11 +385,22 @@ handle_events :: proc(ctx: ^CTX) {
 		case .MOUSEBUTTONDOWN:
 			world_pos := screen_to_world(ctx, e.button.x, e.button.y)
 			if e.button.button == sdl2.BUTTON_LEFT {
-				handle_selection(ctx, world_pos)
+				// Start Dragging
+				ctx.is_dragging = true
+				ctx.drag_start = world_pos
+				clear(&ctx.selected_entities) // Clear previous selection
 			} else if e.button.button == sdl2.BUTTON_RIGHT {
 				grid_pos := world_to_grid(world_pos)
 				handle_movement(ctx, grid_pos)
 			}
+		case .MOUSEBUTTONUP:
+			if e.button.button == sdl2.BUTTON_LEFT && ctx.is_dragging {
+				ctx.is_dragging = false
+				world_pos := screen_to_world(ctx, e.button.x, e.button.y)
+				handle_box_selection(ctx, ctx.drag_start, world_pos)
+			}
+		case .MOUSEMOTION:
+			ctx.current_mouse_pos = screen_to_world(ctx, e.motion.x, e.motion.y)
 		}
 	}
 }
@@ -422,9 +432,7 @@ handle_camera :: proc(ctx: ^CTX) {
 
 // --- Specific Input Handlers ---
 
-handle_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
-	ctx.selected_entity = nil // Deselect by default
-	
+handle_single_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
 	mouse_p := sdl2.Point{x = i32(world_pos.x), y = i32(world_pos.y)}
 	
 	for unit in ctx.entities {
@@ -436,17 +444,44 @@ handle_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
 		}
 		
 		if sdl2.PointInRect(&mouse_p, &unit_rect) {
-			ctx.selected_entity = unit
-			log.info("Selected Unit via Bounding Box at", world_pos)
+			append(&ctx.selected_entities, unit)
+			log.info("Selected Unit via Click")
 			break
 		}
 	}
 }
 
+handle_box_selection :: proc(ctx: ^CTX, start, end: Vec2) {
+	// Calculate Min/Max for AABB
+	min_x := math.min(start.x, end.x)
+	max_x := math.max(start.x, end.x)
+	min_y := math.min(start.y, end.y)
+	max_y := math.max(start.y, end.y)
+	
+	// For single click (or tiny drag), treat as point selection
+	if max_x - min_x < 2 && max_y - min_y < 2 {
+		handle_single_selection(ctx, start)
+		return
+	}
+
+	for unit in ctx.entities {
+		// Check if unit center is in box
+		center := unit.pos + Vec2{f32(TILE_SIZE)/2, f32(TILE_SIZE)/2}
+		
+		if center.x >= min_x && center.x <= max_x &&
+		   center.y >= min_y && center.y <= max_y {
+			append(&ctx.selected_entities, unit)
+			log.info("Selected Unit via Box")
+		}
+	}
+}
+
 handle_movement :: proc(ctx: ^CTX, grid_pos: IVec2) {
-	if ctx.selected_entity != nil {
-		ctx.selected_entity.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
-		log.info("Moving Unit to Grid", grid_pos)
+	for unit in ctx.selected_entities {
+		unit.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
+	}
+	if len(ctx.selected_entities) > 0 {
+		log.info("Moving", len(ctx.selected_entities), "units to Grid", grid_pos)
 	}
 }
 
@@ -462,6 +497,16 @@ world_to_grid :: proc(world_pos: Vec2) -> IVec2 {
 
 grid_to_screen :: proc(ctx: ^CTX, gx, gy: int) -> (x, y: i32) {
 	return ctx.offset_x + i32(gx) * TILE_SIZE, ctx.offset_y + i32(gy) * TILE_SIZE
+}
+
+check_collision :: proc(pos_a, pos_b: Vec2) -> bool {
+	//TODO we need to pass entities, or hitboxes at some point ?
+	SIZE :: f32(TILE_SIZE)
+	// AABB Overlap Test
+	return pos_a.x < pos_b.x + SIZE &&
+	       pos_a.x + SIZE > pos_b.x &&
+	       pos_a.y < pos_b.y + SIZE &&
+	       pos_a.y + SIZE > pos_b.y
 }
 
 draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
@@ -581,23 +626,46 @@ main :: proc() {
 
 		for e in dune_ctx.entities {
 			draw_entity(&dune_ctx, e)
-			
-			// Selection Box
-			if e == dune_ctx.selected_entity {
-				sx := dune_ctx.offset_x + i32(e.pos.x)
-				sy := dune_ctx.offset_y + i32(e.pos.y)
-				
-				// Draw slightly larger box
-				r := sdl2.Rect{x=sx, y=sy, w=TILE_SIZE, h=TILE_SIZE}
-				sdl2.SetRenderDrawColor(dune_ctx.renderer, 0, 255, 0, 255) // Green
-				sdl2.RenderDrawRect(dune_ctx.renderer, &r)
-			}
 		}
 		
+		for e in dune_ctx.selected_entities {
+			draw_selected_box(&dune_ctx, e)
+		}
+
+		if dune_ctx.is_dragging {
+			draw_mouse_select_box(&dune_ctx)
+		}
+
 		draw_minimap(&dune_ctx)
 		
 		sdl2.RenderPresent(dune_ctx.renderer)
 	}
+}
+
+draw_selected_box :: proc(ctx: ^CTX, e: ^Entity) {
+	sx := ctx.offset_x + i32(e.pos.x)
+	sy := ctx.offset_y + i32(e.pos.y)
+
+	r := sdl2.Rect{x=sx, y=sy, w=TILE_SIZE, h=TILE_SIZE}
+	sdl2.SetRenderDrawColor(ctx.renderer, 0, 255, 0, 255) // Green
+	sdl2.RenderDrawRect(ctx.renderer, &r)
+}
+
+draw_mouse_select_box :: proc(ctx: ^CTX) {
+	start_x := ctx.offset_x + i32(ctx.drag_start.x)
+	start_y := ctx.offset_y + i32(ctx.drag_start.y)
+
+	curr_x := ctx.offset_x + i32(ctx.current_mouse_pos.x)
+	curr_y := ctx.offset_y + i32(ctx.current_mouse_pos.y)
+
+	min_x := min(start_x, curr_x)
+	min_y := min(start_y, curr_y)
+	w := abs(curr_x - start_x)
+	h := abs(curr_y - start_y)
+
+	rect := sdl2.Rect{x=min_x, y=min_y, w=w, h=h}
+	sdl2.SetRenderDrawColor(ctx.renderer, 0, 255, 0, 255)
+	sdl2.RenderDrawRect(ctx.renderer, &rect)
 }
 
 draw_minimap :: proc(ctx: ^CTX) {
