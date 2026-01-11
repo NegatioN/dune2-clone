@@ -31,9 +31,13 @@ IVec2 :: [2]int
 Direction :: enum {
 	None,
 	Up,
-	Down,
-	Left,
+	UpRight,
 	Right,
+	DownRight,
+	Down,
+	DownLeft,
+	Left,
+	UpLeft,
 }
 
 AnimState :: enum {
@@ -84,7 +88,7 @@ get_anim_info :: proc(state: AnimState) -> (row_offset: i32, num_frames: int) {
 	// Simple offset from base position
 	switch state {
 	case .Idle:      return 0, 1
-	case .Moving:    return 0, 1 // For now, reuse idle frame as we don't know moving frames layout
+	case .Moving:    return 0, 8
 	case .Attacking: return 0, 1
 	}
 	return 0, 1
@@ -295,8 +299,8 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int) {
 	e := new(Entity)
 	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
 	e.target_pos = e.pos
-	e.tex = ctx.tileset // Using the same texture
-	e.base_sprite_pos = IVec2{10, 7} // Trying inverted coordinates to fit bounds
+	e.tex = ctx.units_tex // Using the same texture
+	e.base_sprite_pos = IVec2{2, 0} // Trying inverted coordinates to fit bounds
 	e.state = .Idle
 	e.frame_idx = 0
 	e.anim_speed = 0.1
@@ -316,6 +320,21 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 		e.state = .Moving
 		dir := e.target_pos - e.pos
 		dir = linalg.normalize(dir)
+		
+		// Update Direction (8-way)
+		angle := math.atan2(dir.y, dir.x)
+		deg := math.to_degrees(angle)
+		if deg < 0 { deg += 360 }
+		
+		offset :: 22.5
+		if deg >= 360 - offset || deg < offset { e.current_dir = .Right }
+		else if deg < 45 + offset { e.current_dir = .DownRight }
+		else if deg < 90 + offset { e.current_dir = .Down }
+		else if deg < 135 + offset { e.current_dir = .DownLeft }
+		else if deg < 180 + offset { e.current_dir = .Left }
+		else if deg < 225 + offset { e.current_dir = .UpLeft }
+		else if deg < 270 + offset { e.current_dir = .Up }
+		else { e.current_dir = .UpRight }
 		
 		// Proposed movement
 		move_vec := dir * SPEED * dt
@@ -499,6 +518,21 @@ grid_to_screen :: proc(ctx: ^CTX, gx, gy: int) -> (x, y: i32) {
 	return ctx.offset_x + i32(gx) * TILE_SIZE, ctx.offset_y + i32(gy) * TILE_SIZE
 }
 
+get_direction_info :: proc(dir: Direction) -> (row: i32, flip: sdl2.RendererFlip) {
+	switch dir {
+	case .Up:        return 0, .NONE
+	case .UpRight:   return 1, .NONE
+	case .Right:     return 2, .NONE
+	case .DownRight: return 1, .VERTICAL
+	case .Down:      return 0, .VERTICAL
+	case .DownLeft:  return 1, .VERTICAL + .HORIZONTAL
+	case .Left:      return 2, .HORIZONTAL
+	case .UpLeft:    return 1, .HORIZONTAL
+	case .None:      return 0, .NONE
+	}
+	return 0, .NONE
+}
+
 check_collision :: proc(pos_a, pos_b: Vec2) -> bool {
 	//TODO we need to pass entities, or hitboxes at some point ?
 	SIZE :: f32(TILE_SIZE)
@@ -517,13 +551,15 @@ draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
 	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
 	
 	// 2. Calculate Source Rect (Animation Frame)
-	row_offset, _ := get_anim_info(entity.state)
+	// New logic: Use direction rows
+	row, flip := get_direction_info(entity.current_dir)
 	
-	// Base X + Animation Frame Offset
-	src_x := i32(entity.base_sprite_pos.x) * TILE_SIZE + i32(entity.frame_idx) * TILE_SIZE
+	// Frame from animation state
+	_, num_frames := get_anim_info(entity.state)
+	frame := entity.frame_idx % num_frames // Safety wrap
 	
-	// Base Y + Animation State Row Offset
-	src_y := (i32(entity.base_sprite_pos.y) + row_offset) * TILE_SIZE
+	src_x := i32(frame) * TILE_SIZE
+	src_y := row * TILE_SIZE
 	
 	src := sdl2.Rect{x = src_x, y = src_y, w = TILE_SIZE, h = TILE_SIZE}
 
@@ -532,7 +568,7 @@ draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
 	
 	// If texture is nil, we might want to draw a debug rect, but for now assuming valid texture
 	if entity.tex != nil {
-		sdl2.RenderCopyEx(ctx.renderer, entity.tex, &src, &dst, entity.rotation, nil, .NONE)
+		sdl2.RenderCopyEx(ctx.renderer, entity.tex, &src, &dst, entity.rotation, nil, flip)
 	}
 	
 	// DEBUG: Draw Red Box outline to verify position
@@ -572,7 +608,7 @@ main :: proc() {
 	// Load Assets
 	dune_ctx.tileset = load_texture(&dune_ctx, "assets/tileset2_32x32.png")
 	if dune_ctx.tileset == nil { return }
-	dune_ctx.units_tex = dune_ctx.tileset
+	dune_ctx.units_tex = load_texture(&dune_ctx, "assets/tank_32x32.png")
 	
 	// Init Map
 	init_map(&dune_ctx)
