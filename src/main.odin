@@ -52,6 +52,11 @@ TerrainType :: enum {
 	Spice,
 }
 
+Player :: enum {
+	Player1,
+	Player2,
+}
+
 Tile :: struct {
 	terrain:  TerrainType,
 	tile_id:  int,      // Index in the tileset texture (Column N)
@@ -65,6 +70,9 @@ game_map: [MAP_WIDTH * MAP_HEIGHT]Tile
 
 // Generic Entity
 Entity :: struct {
+	// Identity
+	faction:     Player,
+
 	// Spatial
 	pos:         Vec2,     // World position (pixels)
 	target_pos:  Vec2,     // Target world position
@@ -170,6 +178,8 @@ load_texture :: proc(ctx: ^CTX, path: string) -> ^sdl2.Texture {
 	tex := img.LoadTexture(ctx.renderer, c_path)
 	if tex == nil {
 		log.errorf("Failed to load texture %s: %s", path, sdl2.GetError())
+	} else {
+		sdl2.SetTextureBlendMode(tex, .BLEND)
 	}
 	return tex
 }
@@ -290,21 +300,19 @@ draw_map :: proc(ctx: ^CTX) {
 
 // --- Entities ---
 
-spawn_unit :: proc(ctx: ^CTX, x, y: int) {
+spawn_unit :: proc(ctx: ^CTX, x, y: int, faction: Player) {
 	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
 	
 	idx := y * MAP_WIDTH + x
 	if game_map[idx].occupier != nil { return } // Tile occupied
 
 	e := new(Entity)
+	e.faction = faction
 	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
 	e.target_pos = e.pos
-	e.tex = ctx.units_tex // Using the same texture
-	e.base_sprite_pos = IVec2{2, 0} // Trying inverted coordinates to fit bounds
+	e.tex = ctx.units_tex
+	e.base_sprite_pos = IVec2{0, 0}
 	e.state = .Idle
-	e.frame_idx = 0
-	e.anim_speed = 0.1
-	e.current_dir = .Up
 	
 	game_map[idx].occupier = e
 	append(&ctx.entities, e)
@@ -614,8 +622,8 @@ main :: proc() {
 	init_map(&dune_ctx)
 	
 	// Spawn Test Unit
-	spawn_unit(&dune_ctx, 10, 10)
-	spawn_unit(&dune_ctx, 12, 10)
+	spawn_unit(&dune_ctx, 10, 10, .Player1)
+	spawn_unit(&dune_ctx, 12, 10, .Player2)
 
 	last_count := sdl2.GetPerformanceCounter()
 	freq := sdl2.GetPerformanceFrequency()
@@ -723,7 +731,11 @@ draw_minimap :: proc(ctx: ^CTX) {
 			// Color based on terrain or unit
 			r, g, b: u8
 			if tile.occupier != nil {
-				r, g, b = 0, 0, 255 // Blue for units
+				// Color by faction
+				switch tile.occupier.faction {
+				case .Player1:  r, g, b = 0, 0, 255   // Blue
+				case .Player2: r, g, b = 255, 0, 0   // Red
+				}
 			} else {
 				switch tile.terrain {
 				case .Sand:  r, g, b = 194, 125, 60
