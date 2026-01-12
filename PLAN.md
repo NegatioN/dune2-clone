@@ -26,7 +26,8 @@
 - [x] Unit Collision Detection (Basic blocking).
 - [ ] Pathfinding (A* or Flow Fields).
 - [x] Unit States (Idle, Move, Attack animation states).
-- [ ] Combat System (Range checks, Projectiles, Damage, Health).
+- [x] Combat System (Range checks, Projectiles, Damage, Health).
+- [ ] Optimization: Use 'inactive' state for dead units/projectiles instead of removing/allocating.
 
 ## 5. Buildings & Construction
 - [ ] Building Placement (Grid snapping, collision check).

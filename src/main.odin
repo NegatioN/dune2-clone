@@ -108,6 +108,7 @@ Projectile :: struct {
 	speed:   f32,
 	damage:  int,
 	active:  bool,
+	target:  ^Entity,
 }
 
 get_anim_info :: proc(state: AnimState) -> (row_offset: i32, num_frames: int) {
@@ -390,6 +391,7 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 						speed = 300.0,
 						damage = e.damage,
 						active = true,
+						target = e.combat_target,
 					}
 					append(&ctx.projectiles, proj)
 					log.info("Fired projectile")
@@ -589,12 +591,15 @@ issue_attack_order :: proc(ctx: ^CTX, target: ^Entity) {
 	count := 0
 	for unit in ctx.selected_entities {
 		if unit == target { continue }
+		if unit.player == target.player { continue } // Prevent friendly fire
 		unit.combat_target = target
 		// Reset target pos so it stops moving to previous location and focuses on target
 		// Logic in update_entity will handle moving to range
 		count += 1
 	}
-	log.infof("Attack order issued by %d units against %v", count, target.player)
+	if count > 0 {
+		log.infof("Attack order issued by %d units against %v", count, target.player)
+	}
 }
 
 handle_single_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
@@ -708,6 +713,22 @@ draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
 		sdl2.RenderCopyEx(ctx.renderer, entity.tex, &src, &dst, entity.rotation, nil, flip)
 	}
 	
+	// Draw Player Indicator (Dot) TODO temporary
+	dot_x := screen_x + 2
+	dot_y := screen_y + 2
+	dot_w := i32(4)
+	dot_h := i32(4)
+	dot := sdl2.Rect{x=dot_x, y=dot_y, w=dot_w, h=dot_h}
+	
+	r, g, b: u8
+	switch entity.player {
+	case .Player1: r, g, b = 0, 0, 255 // Blue
+	case .Player2: r, g, b = 255, 0, 0 // Red
+	}
+	
+	sdl2.SetRenderDrawColor(ctx.renderer, r, g, b, 255)
+	sdl2.RenderFillRect(ctx.renderer, &dot)
+	
 	// DEBUG: Draw Red Box outline to verify position
 	//sdl2.SetRenderDrawColor(ctx.renderer, 255, 0, 0, 255)
 	//sdl2.RenderDrawRect(ctx.renderer, &dst)
@@ -736,6 +757,26 @@ update_projectiles :: proc(ctx: ^CTX, dt: f32) {
 	for i := 0; i < len(ctx.projectiles); {
 		p := &ctx.projectiles[i]
 		
+		// Homing Logic
+		if p.target != nil {
+			// Verify target exists
+			exists := false
+			for unit in ctx.entities {
+				if unit == p.target {
+					exists = true
+					break
+				}
+			}
+			
+			if exists {
+				// Update Direction to target center
+				target_center := p.target.pos + {TILE_SIZE/2, TILE_SIZE/2}
+				p.dir = linalg.normalize(target_center - p.pos)
+			} else {
+				p.target = nil // Stop homing if target lost
+			}
+		}
+		
 		// Move
 		p.pos += p.dir * p.speed * dt
 		
@@ -743,14 +784,14 @@ update_projectiles :: proc(ctx: ^CTX, dt: f32) {
 		// For now just check collision
 		hit := false
 		
-		// Check collision with units
-		for unit_idx := 0; unit_idx < len(ctx.entities); unit_idx += 1 {
-			unit := ctx.entities[unit_idx]
-			if unit.player == p.owner { continue } // Don't hit own faction
-			
-			// Simple circle/box check
-			// Projectile is small point
+		// Check collision with specific target only
+		if p.target != nil {
+			unit := p.target
 			HIT_DIST :: 16.0
+			
+			// Verify target is still valid/alive (simple check if it's in our entities list would be safer, 
+			// but for now we rely on the homing check logic which already sets p.target = nil if lost)
+			
 			if linalg.distance(p.pos, unit.pos + {TILE_SIZE/2, TILE_SIZE/2}) < HIT_DIST {
 				// HIT!
 				unit.hp -= p.damage
@@ -767,10 +808,13 @@ update_projectiles :: proc(ctx: ^CTX, dt: f32) {
 						}
 					}
 					
-					// Remove from entities list (unordered remove is fast)
-					// Need to be careful with index if we are iterating entities elsewhere?
-					// This update is done in main loop phase.
-					unordered_remove(&ctx.entities, unit_idx)
+					// Find unit in entities list to remove
+					for unit_idx := 0; unit_idx < len(ctx.entities); unit_idx += 1 {
+						if ctx.entities[unit_idx] == unit {
+							unordered_remove(&ctx.entities, unit_idx)
+							break
+						}
+					}
 					
 					// Also remove from selected if active
 					for s_i := 0; s_i < len(ctx.selected_entities); {
@@ -782,13 +826,8 @@ update_projectiles :: proc(ctx: ^CTX, dt: f32) {
 					}
 					
 					free(unit)
-					// Don't decrement unit_idx because we broke the loop? 
-					// Actually we are inside projectile loop, iterating entities.
-					// If we remove entity, the next entity swaps into this slot.
-					// So we should re-check this index? No, we hit one thing and die.
 				}
 				hit = true
-				break
 			}
 		}
 		
@@ -821,6 +860,7 @@ main :: proc() {
 	
 	// Spawn Test Unit
 	spawn_unit(&dune_ctx, 10, 10, .Player1)
+	spawn_unit(&dune_ctx, 15, 10, .Player1)
 	spawn_unit(&dune_ctx, 12, 10, .Player2)
 
 	last_count := sdl2.GetPerformanceCounter()
