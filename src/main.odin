@@ -71,7 +71,7 @@ game_map: [MAP_WIDTH * MAP_HEIGHT]Tile
 // Generic Entity
 Entity :: struct {
 	// Identity
-	faction:     Player,
+	player:      Player,
 
 	// Spatial
 	pos:         Vec2,     // World position (pixels)
@@ -90,6 +90,24 @@ Entity :: struct {
 	
 	// Game Logic
 	current_dir: Direction,
+
+	// Combat
+	hp:            int,
+	max_hp:        int,
+	damage:        int,
+	attack_range:  f32,
+	attack_timer:  f32,
+	attack_speed:  f32, // Cooldown in seconds
+	combat_target: ^Entity,
+}
+
+Projectile :: struct {
+	owner:   Player,
+	pos:     Vec2,
+	dir:     Vec2,
+	speed:   f32,
+	damage:  int,
+	active:  bool,
 }
 
 get_anim_info :: proc(state: AnimState) -> (row_offset: i32, num_frames: int) {
@@ -113,9 +131,11 @@ CTX :: struct {
 	// Game Logic
 	selected_entities: [dynamic]^Entity,
 	entities:          [dynamic]^Entity,
+	projectiles:       [dynamic]Projectile,
 	
 	// Selection State
 	is_dragging:       bool,
+	is_targeting:      bool, // Attack Move / Targeting mode
 	drag_start:        Vec2,
 	current_mouse_pos: Vec2,
 	
@@ -206,6 +226,7 @@ cleanup :: proc(ctx: ^CTX) {
 	}
 	delete(ctx.selected_entities)
 	delete(ctx.entities)
+	delete(ctx.projectiles)
 	ttf.Quit()
 	img.Quit()
 	sdl2.Quit()
@@ -300,25 +321,87 @@ draw_map :: proc(ctx: ^CTX) {
 
 // --- Entities ---
 
-spawn_unit :: proc(ctx: ^CTX, x, y: int, faction: Player) {
+spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
 	
 	idx := y * MAP_WIDTH + x
 	if game_map[idx].occupier != nil { return } // Tile occupied
 
 	e := new(Entity)
-	e.faction = faction
+	e.player = player
 	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
 	e.target_pos = e.pos
-	e.tex = ctx.units_tex
-	e.base_sprite_pos = IVec2{0, 0}
+	e.tex = ctx.units_tex // Use the dedicated units texture
+	e.base_sprite_pos = IVec2{0, 0} // Reset base since we are using a dedicated sheet
 	e.state = .Idle
+	e.frame_idx = 0
+	e.anim_speed = 0.1
+	e.current_dir = .Up
+	
+	// Combat Stats
+	e.hp = 100
+	e.max_hp = 100
+	e.damage = 10
+	e.attack_range = 150.0
+	e.attack_timer = 0.0
+	e.attack_speed = 1.0 // 1 second cooldown
 	
 	game_map[idx].occupier = e
 	append(&ctx.entities, e)
 }
 
 update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
+	// Combat Logic
+	if e.combat_target != nil {
+		// Validate Target (Simple/Slow check)
+		target_exists := false
+		for unit in ctx.entities {
+			if unit == e.combat_target {
+				target_exists = true
+				break
+			}
+		}
+		
+		if !target_exists {
+			e.combat_target = nil
+			e.state = .Idle
+		} else {
+			dist := linalg.distance(e.pos, e.combat_target.pos)
+			if dist <= e.attack_range {
+				// In Range - Attack
+				e.state = .Attacking
+				e.target_pos = e.pos // Stop moving
+				
+				// Face Target
+				dir := e.combat_target.pos - e.pos
+				// Reuse direction logic later? Or just set it here?
+				// For now, let's just fire.
+				
+				e.attack_timer += dt
+				if e.attack_timer >= e.attack_speed {
+					e.attack_timer = 0
+					
+					// Spawn Projectile
+					p_dir := linalg.normalize(e.combat_target.pos - e.pos)
+					proj := Projectile{
+						owner = e.player,
+						pos = e.pos + {TILE_SIZE/2, TILE_SIZE/2},
+						dir = p_dir,
+						speed = 300.0,
+						damage = e.damage,
+						active = true,
+					}
+					append(&ctx.projectiles, proj)
+					log.info("Fired projectile")
+				}
+				return // Skip movement logic
+			} else {
+				// Move towards target
+				e.target_pos = e.combat_target.pos
+			}
+		}
+	}
+
 	// Simple movement logic: Lerp towards target
 	SPEED :: 100.0 // Pixels per second
 
@@ -407,10 +490,37 @@ handle_events :: proc(ctx: ^CTX) {
 			ctx.should_close = true
 		case .KEYDOWN:
 			if e.key.keysym.sym == .ESCAPE {
-				ctx.should_close = true
+				if ctx.is_targeting {
+					ctx.is_targeting = false
+					log.info("Targeting Cancelled")
+				} else {
+					ctx.should_close = true
+				}
+			} else if e.key.keysym.sym == .A {
+				if len(ctx.selected_entities) > 0 {
+					ctx.is_targeting = true
+					log.info("Targeting Mode ON")
+				}
 			}
 		case .MOUSEBUTTONDOWN:
 			world_pos := screen_to_world(ctx, e.button.x, e.button.y)
+			
+			if ctx.is_targeting {
+				if e.button.button == sdl2.BUTTON_LEFT {
+					target := get_entity_at(ctx, world_pos)
+					if target != nil {
+						issue_attack_order(ctx, target)
+					} else {
+						log.info("No target selected")
+					}
+					ctx.is_targeting = false
+				} else if e.button.button == sdl2.BUTTON_RIGHT {
+					ctx.is_targeting = false
+					log.info("Targeting Cancelled")
+				}
+				return
+			}
+
 			if e.button.button == sdl2.BUTTON_LEFT {
 				// Start Dragging
 				ctx.is_dragging = true
@@ -459,9 +569,8 @@ handle_camera :: proc(ctx: ^CTX) {
 
 // --- Specific Input Handlers ---
 
-handle_single_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
+get_entity_at :: proc(ctx: ^CTX, world_pos: Vec2) -> ^Entity {
 	mouse_p := sdl2.Point{x = i32(world_pos.x), y = i32(world_pos.y)}
-	
 	for unit in ctx.entities {
 		unit_rect := sdl2.Rect{
 			x = i32(unit.pos.x),
@@ -469,12 +578,30 @@ handle_single_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
 			w = TILE_SIZE,
 			h = TILE_SIZE,
 		}
-		
 		if sdl2.PointInRect(&mouse_p, &unit_rect) {
-			append(&ctx.selected_entities, unit)
-			log.info("Selected Unit via Click")
-			break
+			return unit
 		}
+	}
+	return nil
+}
+
+issue_attack_order :: proc(ctx: ^CTX, target: ^Entity) {
+	count := 0
+	for unit in ctx.selected_entities {
+		if unit == target { continue }
+		unit.combat_target = target
+		// Reset target pos so it stops moving to previous location and focuses on target
+		// Logic in update_entity will handle moving to range
+		count += 1
+	}
+	log.infof("Attack order issued by %d units against %v", count, target.player)
+}
+
+handle_single_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
+	unit := get_entity_at(ctx, world_pos)
+	if unit != nil {
+		append(&ctx.selected_entities, unit)
+		log.info("Selected Unit via Click")
 	}
 }
 
@@ -506,6 +633,8 @@ handle_box_selection :: proc(ctx: ^CTX, start, end: Vec2) {
 handle_movement :: proc(ctx: ^CTX, grid_pos: IVec2) {
 	for unit in ctx.selected_entities {
 		unit.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
+		unit.combat_target = nil // Stop attacking
+		unit.state = .Moving     // Reset state
 	}
 	if len(ctx.selected_entities) > 0 {
 		log.info("Moving", len(ctx.selected_entities), "units to Grid", grid_pos)
@@ -603,6 +732,75 @@ render_text :: proc(ctx: ^CTX, text: string, x, y: i32, color: sdl2.Color) {
 	}
 }
 
+update_projectiles :: proc(ctx: ^CTX, dt: f32) {
+	for i := 0; i < len(ctx.projectiles); {
+		p := &ctx.projectiles[i]
+		
+		// Move
+		p.pos += p.dir * p.speed * dt
+		
+		// Check bounds (optional, remove if too far)
+		// For now just check collision
+		hit := false
+		
+		// Check collision with units
+		for unit_idx := 0; unit_idx < len(ctx.entities); unit_idx += 1 {
+			unit := ctx.entities[unit_idx]
+			if unit.player == p.owner { continue } // Don't hit own faction
+			
+			// Simple circle/box check
+			// Projectile is small point
+			HIT_DIST :: 16.0
+			if linalg.distance(p.pos, unit.pos + {TILE_SIZE/2, TILE_SIZE/2}) < HIT_DIST {
+				// HIT!
+				unit.hp -= p.damage
+				log.infof("Unit hit! HP: %d/%d", unit.hp, unit.max_hp)
+				
+				if unit.hp <= 0 {
+					// Kill Unit
+					// Remove from grid
+					grid_pos := world_to_grid(unit.pos)
+					idx := grid_pos.y * MAP_WIDTH + grid_pos.x
+					if idx >= 0 && idx < len(game_map) {
+						if game_map[idx].occupier == unit {
+							game_map[idx].occupier = nil
+						}
+					}
+					
+					// Remove from entities list (unordered remove is fast)
+					// Need to be careful with index if we are iterating entities elsewhere?
+					// This update is done in main loop phase.
+					unordered_remove(&ctx.entities, unit_idx)
+					
+					// Also remove from selected if active
+					for s_i := 0; s_i < len(ctx.selected_entities); {
+						if ctx.selected_entities[s_i] == unit {
+							unordered_remove(&ctx.selected_entities, s_i)
+						} else {
+							s_i += 1
+						}
+					}
+					
+					free(unit)
+					// Don't decrement unit_idx because we broke the loop? 
+					// Actually we are inside projectile loop, iterating entities.
+					// If we remove entity, the next entity swaps into this slot.
+					// So we should re-check this index? No, we hit one thing and die.
+				}
+				hit = true
+				break
+			}
+		}
+		
+		if hit {
+			// Remove projectile
+			unordered_remove(&ctx.projectiles, i)
+		} else {
+			i += 1
+		}
+	}
+}
+
 // --- Main Loop ---
 
 dune_ctx := CTX{}
@@ -662,6 +860,8 @@ main :: proc() {
 			update_entity(&dune_ctx, e, dt)
 		}
 		
+		update_projectiles(&dune_ctx, dt)
+		
 		// 2. Draw Entities (Render)
 		// Sort by Y for simple depth sorting
 		slice.sort_by(dune_ctx.entities[:], proc(i, j: ^Entity) -> bool {
@@ -672,6 +872,19 @@ main :: proc() {
 			draw_entity(&dune_ctx, e)
 		}
 		
+		// Render Projectiles
+		for p in dune_ctx.projectiles {
+			rect := sdl2.Rect{
+				x = dune_ctx.offset_x + i32(p.pos.x),
+				y = dune_ctx.offset_y + i32(p.pos.y),
+				w = 4,
+				h = 4,
+			}
+			sdl2.SetRenderDrawColor(dune_ctx.renderer, 255, 255, 0, 255) // Yellow
+			sdl2.RenderFillRect(dune_ctx.renderer, &rect)
+		}
+		
+		// Draw Selection Indicators
 		for e in dune_ctx.selected_entities {
 			draw_selected_box(&dune_ctx, e)
 		}
@@ -690,9 +903,34 @@ draw_selected_box :: proc(ctx: ^CTX, e: ^Entity) {
 	sx := ctx.offset_x + i32(e.pos.x)
 	sy := ctx.offset_y + i32(e.pos.y)
 
+	// Selection Box
 	r := sdl2.Rect{x=sx, y=sy, w=TILE_SIZE, h=TILE_SIZE}
 	sdl2.SetRenderDrawColor(ctx.renderer, 0, 255, 0, 255) // Green
 	sdl2.RenderDrawRect(ctx.renderer, &r)
+	
+	// Health Bar
+	if e.max_hp > 0 {
+		BAR_WIDTH  :: 28
+		BAR_HEIGHT :: 4
+		OFFSET_Y   :: 2 // Pixels below sprite
+		
+		bar_x := sx + (TILE_SIZE - BAR_WIDTH) / 2
+		bar_y := sy + TILE_SIZE + OFFSET_Y
+		
+		// Background (Red)
+		bg := sdl2.Rect{x=bar_x, y=bar_y, w=BAR_WIDTH, h=BAR_HEIGHT}
+		sdl2.SetRenderDrawColor(ctx.renderer, 255, 0, 0, 255)
+		sdl2.RenderFillRect(ctx.renderer, &bg)
+		
+		// Foreground (Green) - based on HP pct
+		pct := f32(e.hp) / f32(e.max_hp)
+		pct = math.clamp(pct, 0.0, 1.0)
+		fg_w := i32(f32(BAR_WIDTH) * pct)
+		
+		fg := sdl2.Rect{x=bar_x, y=bar_y, w=fg_w, h=BAR_HEIGHT}
+		sdl2.SetRenderDrawColor(ctx.renderer, 0, 255, 0, 255)
+		sdl2.RenderFillRect(ctx.renderer, &fg)
+	}
 }
 
 draw_mouse_select_box :: proc(ctx: ^CTX) {
@@ -731,10 +969,10 @@ draw_minimap :: proc(ctx: ^CTX) {
 			// Color based on terrain or unit
 			r, g, b: u8
 			if tile.occupier != nil {
-				// Color by faction
-				switch tile.occupier.faction {
+				// Color by player
+				switch tile.occupier.player {
 				case .Player1:  r, g, b = 0, 0, 255   // Blue
-				case .Player2: r, g, b = 255, 0, 0   // Red
+				case .Player2:  r, g, b = 255, 0, 0   // Red
 				}
 			} else {
 				switch tile.terrain {
