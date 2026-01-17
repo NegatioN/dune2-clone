@@ -57,6 +57,11 @@ Player :: enum {
 	Player2,
 }
 
+EntityType :: enum {
+	Unit,
+	Building,
+}
+
 Tile :: struct {
 	terrain:  TerrainType,
 	tile_id:  int,      // Index in the tileset texture (Column N)
@@ -72,6 +77,7 @@ game_map: [MAP_WIDTH * MAP_HEIGHT]Tile
 Entity :: struct {
 	// Identity
 	player:      Player,
+	type:        EntityType,
 
 	// Spatial
 	pos:         Vec2,     // World position (pixels)
@@ -330,6 +336,7 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 
 	e := new(Entity)
 	e.player = player
+	e.type = .Unit
 	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
 	e.target_pos = e.pos
 	e.tex = ctx.units_tex // Use the dedicated units texture
@@ -349,6 +356,34 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	
 	game_map[idx].occupier = e
 	append(&ctx.entities, e)
+}
+
+spawn_building :: proc(ctx: ^CTX, x, y: int, player: Player) {
+	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
+	
+	idx := y * MAP_WIDTH + x
+	if game_map[idx].occupier != nil { return }
+
+	e := new(Entity)
+	e.player = player
+	e.type = .Building
+	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
+	e.target_pos = e.pos
+	e.tex = ctx.tileset // Use tileset for buildings
+	e.base_sprite_pos = IVec2{12, 0}
+	e.state = .Idle
+	e.frame_idx = 0
+	e.anim_speed = 0.0
+	e.current_dir = .None // Indicates static building
+	
+	e.hp = 500
+	e.max_hp = 500
+	e.damage = 0
+	e.attack_range = 0
+	
+	game_map[idx].occupier = e
+	append(&ctx.entities, e)
+	log.info("Spawned Building at", x, y)
 }
 
 update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
@@ -503,6 +538,9 @@ handle_events :: proc(ctx: ^CTX) {
 					ctx.is_targeting = true
 					log.info("Targeting Mode ON")
 				}
+			} else if e.key.keysym.sym == .G {
+				grid_pos := world_to_grid(ctx.current_mouse_pos)
+				spawn_building(ctx, grid_pos.x, grid_pos.y, .Player1)
 			}
 		case .MOUSEBUTTONDOWN:
 			world_pos := screen_to_world(ctx, e.button.x, e.button.y)
@@ -636,13 +674,17 @@ handle_box_selection :: proc(ctx: ^CTX, start, end: Vec2) {
 }
 
 handle_movement :: proc(ctx: ^CTX, grid_pos: IVec2) {
+	count := 0
 	for unit in ctx.selected_entities {
+		if unit.type == .Building { continue }
+		
 		unit.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
 		unit.combat_target = nil // Stop attacking
 		unit.state = .Moving     // Reset state
+		count += 1
 	}
-	if len(ctx.selected_entities) > 0 {
-		log.info("Moving", len(ctx.selected_entities), "units to Grid", grid_pos)
+	if count > 0 {
+		log.info("Moving", count, "units to Grid", grid_pos)
 	}
 }
 
@@ -692,16 +734,26 @@ draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
 
 	dst := sdl2.Rect{x = screen_x, y = screen_y, w = TILE_SIZE, h = TILE_SIZE}
 	
-	// 2. Calculate Source Rect (Animation Frame)
-	// New logic: Use direction rows
-	row, flip := get_direction_info(entity.current_dir)
-	
-	// Frame from animation state
-	_, num_frames := get_anim_info(entity.state)
-	frame := entity.frame_idx % num_frames // Safety wrap
-	
-	src_x := i32(frame) * TILE_SIZE
-	src_y := row * TILE_SIZE
+	// 2. Calculate Source Rect
+	src_x, src_y: i32
+	flip: sdl2.RendererFlip
+
+	if entity.current_dir == .None {
+		// Static entity / Building - use base_sprite_pos
+		src_x = i32(entity.base_sprite_pos.x) * TILE_SIZE
+		src_y = i32(entity.base_sprite_pos.y) * TILE_SIZE
+		flip = .NONE
+	} else {
+		// Unit with directional animation
+		row, f := get_direction_info(entity.current_dir)
+		flip = f
+		
+		_, num_frames := get_anim_info(entity.state)
+		frame := entity.frame_idx % num_frames
+		
+		src_x = i32(frame) * TILE_SIZE
+		src_y = row * TILE_SIZE
+	}
 	
 	src := sdl2.Rect{x = src_x, y = src_y, w = TILE_SIZE, h = TILE_SIZE}
 
