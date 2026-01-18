@@ -26,7 +26,7 @@ MINIMAP_SCALE :: 2 // 1 tile = 2x2 pixels
 // --- Core Types ---
 
 Vec2  :: [2]f32
-IVec2 :: [2]int
+IVec2 :: [2]i32
 
 Direction :: enum {
 	None,
@@ -66,6 +66,7 @@ Tile :: struct {
 	terrain:  TerrainType,
 	tile_id:  int,      // Index in the tileset texture (Column N)
 	occupier: ^Entity,
+	pos: IVec2
 }
 
 // Global Map Data
@@ -96,6 +97,7 @@ Entity :: struct {
 	
 	// Game Logic
 	current_dir: Direction,
+	path:        [dynamic]IVec2,
 
 	// Combat
 	hp:            int,
@@ -231,6 +233,10 @@ cleanup :: proc(ctx: ^CTX) {
 	if ctx.window != nil {
 		sdl2.DestroyWindow(ctx.window)
 	}
+	for e in ctx.entities {
+		delete(e.path)
+		free(e)
+	}
 	delete(ctx.selected_entities)
 	delete(ctx.entities)
 	delete(ctx.projectiles)
@@ -268,6 +274,7 @@ init_map :: proc(ctx: ^CTX) {
 
 		idx := y * MAP_WIDTH + x
 		game_map[idx].tile_id = tile_idx
+		game_map[idx].pos = {i32(x), i32(y)}
 		
 		// Set logical terrain type based on visual index (simplified mapping)
 		if tile_idx == 0 { game_map[idx].terrain = .Sand }
@@ -294,40 +301,32 @@ draw_map :: proc(ctx: ^CTX) {
 	end_y   = math.clamp(end_y,   0, MAP_HEIGHT)
 
 	SRC_SIZE    :: 32
-	SRC_PADDING :: 0
+	for tile in game_map {
+		//spirtesheet positions to render.
+		src_x := i32(tile.tile_id) * SRC_SIZE
+		src_y := i32(0) // Specified as Row 0
 
-	for y in start_y..<end_y {
-		for x in start_x..<end_x {
-			tile := &game_map[y * MAP_WIDTH + x]
-			
-			// Calculate Source Rect from Tile Index
-			// Row 0, Column N
-			src_x := i32(tile.tile_id) * (SRC_SIZE + SRC_PADDING)
-			src_y := i32(0) // Specified as Row 0
-
-			src := sdl2.Rect{
-				x = src_x,
-				y = src_y,
-				w = SRC_SIZE,
-				h = SRC_SIZE,
-			}
-
-			// Destination Rect (Screen Space)
-			dst_x, dst_y := grid_to_screen(ctx, int(x), int(y))
-			dst := sdl2.Rect{
-				x = dst_x,
-				y = dst_y,
-				w = TILE_SIZE,
-				h = TILE_SIZE,
-			}
-
-			sdl2.RenderCopy(ctx.renderer, ctx.tileset, &src, &dst)
+		src := sdl2.Rect{
+			x = src_x,
+			y = src_y,
+			w = SRC_SIZE,
+			h = SRC_SIZE,
 		}
+
+		// Destination Rect (Screen Space)
+		dst_x, dst_y := grid_to_screen(ctx, tile.pos.x, tile.pos.y)
+		dst := sdl2.Rect{
+			x = dst_x,
+			y = dst_y,
+			w = TILE_SIZE,
+			h = TILE_SIZE,
+		}
+
+		sdl2.RenderCopy(ctx.renderer, ctx.tileset, &src, &dst)
 	}
 }
 
 // --- Entities ---
-
 spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
 	
@@ -345,6 +344,7 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	e.frame_idx = 0
 	e.anim_speed = 0.1
 	e.current_dir = .Up
+	e.path = make([dynamic]IVec2)
 	
 	// Combat Stats
 	e.hp = 100
@@ -358,7 +358,7 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	append(&ctx.entities, e)
 }
 
-spawn_building :: proc(ctx: ^CTX, x, y: int, player: Player) {
+spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player) {
 	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
 	
 	idx := y * MAP_WIDTH + x
@@ -375,6 +375,7 @@ spawn_building :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	e.frame_idx = 0
 	e.anim_speed = 0.0
 	e.current_dir = .None // Indicates static building
+	e.path = make([dynamic]IVec2)
 	
 	e.hp = 500
 	e.max_hp = 500
@@ -505,7 +506,16 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 		
 	} else {
 		e.pos = e.target_pos
-		e.state = .Idle
+		if len(e.path) > 0 {
+			ordered_remove(&e.path, 0)
+			if len(e.path) > 0 {
+				e.target_pos = Vec2{f32(e.path[0].x * TILE_SIZE), f32(e.path[0].y * TILE_SIZE)}
+			} else {
+				e.state = .Idle
+			}
+		} else {
+			e.state = .Idle
+		}
 	}
 	
 	// Animation Tick
@@ -631,6 +641,7 @@ issue_attack_order :: proc(ctx: ^CTX, target: ^Entity) {
 		if unit == target { continue }
 		if unit.player == target.player { continue } // Prevent friendly fire
 		unit.combat_target = target
+		clear(&unit.path)
 		// Reset target pos so it stops moving to previous location and focuses on target
 		// Logic in update_entity will handle moving to range
 		count += 1
@@ -678,10 +689,16 @@ handle_movement :: proc(ctx: ^CTX, grid_pos: IVec2) {
 	for unit in ctx.selected_entities {
 		if unit.type == .Building { continue }
 		
-		unit.target_pos = Vec2{f32(grid_pos.x * TILE_SIZE), f32(grid_pos.y * TILE_SIZE)}
-		unit.combat_target = nil // Stop attacking
-		unit.state = .Moving     // Reset state
-		count += 1
+		start_grid := world_to_grid(unit.pos)
+		new_path := find_path(start_grid, grid_pos)
+		if new_path != nil {
+			delete(unit.path)
+			unit.path = new_path
+			unit.target_pos = Vec2{f32(unit.path[0].x * TILE_SIZE), f32(unit.path[0].y * TILE_SIZE)}
+			unit.combat_target = nil
+			unit.state = .Moving
+			count += 1
+		}
 	}
 	if count > 0 {
 		log.info("Moving", count, "units to Grid", grid_pos)
@@ -695,11 +712,11 @@ screen_to_world :: proc(ctx: ^CTX, screen_x, screen_y: i32) -> Vec2 {
 }
 
 world_to_grid :: proc(world_pos: Vec2) -> IVec2 {
-	return IVec2{int(world_pos.x) / TILE_SIZE, int(world_pos.y) / TILE_SIZE}
+	return IVec2{i32(world_pos.x) / TILE_SIZE, i32(world_pos.y) / TILE_SIZE}
 }
 
-grid_to_screen :: proc(ctx: ^CTX, gx, gy: int) -> (x, y: i32) {
-	return ctx.offset_x + i32(gx) * TILE_SIZE, ctx.offset_y + i32(gy) * TILE_SIZE
+grid_to_screen :: proc(ctx: ^CTX, gx, gy: i32) -> (x, y: i32) {
+	return ctx.offset_x + gx * TILE_SIZE, ctx.offset_y + gy * TILE_SIZE
 }
 
 get_direction_info :: proc(dir: Direction) -> (row: i32, flip: sdl2.RendererFlip) {
@@ -877,6 +894,7 @@ update_projectiles :: proc(ctx: ^CTX, dt: f32) {
 						}
 					}
 					
+					delete(unit.path)
 					free(unit)
 				}
 				hit = true
@@ -1054,37 +1072,33 @@ draw_minimap :: proc(ctx: ^CTX) {
 	sdl2.RenderFillRect(ctx.renderer, &bg_rect)
 	
 	// 2. Draw Terrain & Units
-	for y in 0..<MAP_HEIGHT {
-		for x in 0..<MAP_WIDTH {
-			tile := game_map[y * MAP_WIDTH + x]
-			
-			// Color based on terrain or unit
-			r, g, b: u8
-			if tile.occupier != nil {
-				// Color by player
-				switch tile.occupier.player {
-				case .Player1:  r, g, b = 0, 0, 255   // Blue
-				case .Player2:  r, g, b = 255, 0, 0   // Red
-				}
-			} else {
-				switch tile.terrain {
-				case .Sand:  r, g, b = 194, 125, 60
-				case .Rock:  r, g, b = 80, 80, 80
-				case .Spice: r, g, b = 255, 140, 0
-				}
+	for tile in game_map {
+		// Color based on terrain or unit
+		r, g, b: u8
+		if tile.occupier != nil {
+		// Color by player
+			switch tile.occupier.player {
+			case .Player1:  r, g, b = 0, 0, 255   // Blue
+			case .Player2:  r, g, b = 255, 0, 0   // Red
 			}
-			
-			sdl2.SetRenderDrawColor(ctx.renderer, r, g, b, 255)
-			pixel_rect := sdl2.Rect{
-				x = MINIMAP_X + i32(x) * MINIMAP_SCALE,
-				y = MINIMAP_Y + i32(y) * MINIMAP_SCALE,
-				w = MINIMAP_SCALE,
-				h = MINIMAP_SCALE,
+		} else {
+			switch tile.terrain {
+			case .Sand:  r, g, b = 194, 125, 60
+			case .Rock:  r, g, b = 80, 80, 80
+			case .Spice: r, g, b = 255, 140, 0
 			}
-			sdl2.RenderFillRect(ctx.renderer, &pixel_rect)
 		}
+
+		sdl2.SetRenderDrawColor(ctx.renderer, r, g, b, 255)
+		pixel_rect := sdl2.Rect{
+			x = MINIMAP_X + tile.pos.x * MINIMAP_SCALE,
+			y = MINIMAP_Y + tile.pos.y * MINIMAP_SCALE,
+			w = MINIMAP_SCALE,
+			h = MINIMAP_SCALE,
+		}
+		sdl2.RenderFillRect(ctx.renderer, &pixel_rect)
 	}
-	
+
 	// 3. Draw Viewport Rect
 	// Camera offset is typically negative (moving right means offset becomes negative).
 	// Viewport X on Map (Tiles) = (-offset_x) / TILE_SIZE
