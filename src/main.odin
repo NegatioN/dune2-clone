@@ -532,13 +532,22 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 // --- Main Input Handling ---
 
 find_spawn_pos :: proc(building_grid: IVec2) -> (IVec2, bool) {
-	// Look for adjacent traversable tiles to spawn unit
-	for dy := -1; dy <= 1; dy += 1 {
-		for dx := -1; dx <= 1; dx += 1 {
-			if dx == 0 && dy == 0 { continue }
-			target := building_grid + IVec2{i32(dx), i32(dy)}
-			if is_traversable(target) {
-				return target, true
+	// Search in expanding rings (radius 1, then 2, etc.)
+	for r in 1..=3 {
+		for dy := -r; dy <= r; dy += 1 {
+			for dx := -r; dx <= r; dx += 1 {
+				if abs(dx) != r && abs(dy) != r { continue }
+				
+				target := building_grid + IVec2{i32(dx), i32(dy)}
+				
+				// Bounds check
+				if target.x < 0 || target.x >= MAP_WIDTH || target.y < 0 || target.y >= MAP_HEIGHT { continue }
+				
+				// STRICT check: Tile must be traversable AND have NO occupier (unit or building)
+				idx := target.y * MAP_WIDTH + target.x
+				if is_traversable(target) && game_map[idx].occupier == nil {
+					return target, true
+				}
 			}
 		}
 	}

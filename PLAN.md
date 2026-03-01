@@ -22,6 +22,7 @@
 
 ## 4. Units & Behaviors
 - [x] Unit Selection (Single click, Box selection).
+- [ ] Multi-Selection: Double-click to select all visible units/buildings of the same type.
 - [x] Unit Movement (Path-based movement).
 - [x] Unit Collision Detection (Basic blocking).
 - [x] Pathfinding (A*).
