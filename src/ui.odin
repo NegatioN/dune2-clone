@@ -13,11 +13,11 @@ MINIMAP_Y     :: WINDOW_HEIGHT - MINIMAP_SIZE - MINIMAP_PAD
 MINIMAP_SCALE :: 2 // 1 tile = 2x2 pixels
 
 draw_ui :: proc(ctx: ^CTX) {
+	color := sdl2.Color{255, 255, 255, 255}
+	
 	if ctx.current_menu == .Building {
-		W :: 150
-		H :: 100
-		X :: WINDOW_WIDTH - W - 10
-		Y :: WINDOW_HEIGHT - H - 150 
+		W, H := i32(150), i32(100)
+		X, Y := WINDOW_WIDTH - W - 10, WINDOW_HEIGHT - H - 150 
 		
 		ui_rect := sdl2.Rect{x = X, y = Y, w = W, h = H}
 		sdl2.SetRenderDrawColor(ctx.renderer, 50, 50, 50, 200)
@@ -25,16 +25,13 @@ draw_ui :: proc(ctx: ^CTX) {
 		sdl2.SetRenderDrawColor(ctx.renderer, 255, 255, 255, 255)
 		sdl2.RenderDrawRect(ctx.renderer, &ui_rect)
 		
-		color := sdl2.Color{255, 255, 255, 255}
 		render_text(ctx, "BUILD MENU:", X + 5, Y + 5, color)
 		render_text(ctx, "[P] Power Plant", X + 5, Y + 30, color)
 		render_text(ctx, "[B] Barracks", X + 5, Y + 55, color)
 		render_text(ctx, "[ESC] Cancel", X + 5, Y + 80, color)
 	} else if ctx.current_menu == .Barracks {
-		W :: 150
-		H :: 75
-		X :: WINDOW_WIDTH - W - 10
-		Y :: WINDOW_HEIGHT - H - 150
+		W, H := i32(150), i32(75)
+		X, Y := WINDOW_WIDTH - W - 10, WINDOW_HEIGHT - H - 150
 		
 		ui_rect := sdl2.Rect{x = X, y = Y, w = W, h = H}
 		sdl2.SetRenderDrawColor(ctx.renderer, 50, 50, 50, 200)
@@ -42,7 +39,6 @@ draw_ui :: proc(ctx: ^CTX) {
 		sdl2.SetRenderDrawColor(ctx.renderer, 255, 255, 255, 255)
 		sdl2.RenderDrawRect(ctx.renderer, &ui_rect)
 		
-		color := sdl2.Color{255, 255, 255, 255}
 		render_text(ctx, "BARRACKS MENU:", X + 5, Y + 5, color)
 		render_text(ctx, "[T] Build Tank", X + 5, Y + 30, color)
 		render_text(ctx, "[ESC] Close", X + 5, Y + 55, color)

@@ -71,7 +71,25 @@ main :: proc() {
 
 	dune_ctx.tileset = load_texture(&dune_ctx, "assets/tileset2_32x32.png")
 	dune_ctx.units_tex = load_texture(&dune_ctx, "assets/tank_32x32.png")
-	dune_ctx.font = ttf.OpenFont("assets/OpenSans-Regular.ttf", 16) // Added missing font load
+	
+	// Try system font first, fallback to asset
+	font_paths := [2]string{
+		"/usr/share/fonts/TTF/DejaVuSans.ttf",
+		"assets/OpenSans-Regular.ttf",
+	}
+	
+	for path in font_paths {
+		c_path := strings.clone_to_cstring(path, context.temp_allocator)
+		dune_ctx.font = ttf.OpenFont(c_path, 16)
+		if dune_ctx.font != nil {
+			log.infof("Loaded font: %s", path)
+			break
+		}
+	}
+
+	if dune_ctx.font == nil {
+		log.error("CRITICAL: Failed to load any font! UI text will not render.")
+	}
 	
 	init_map(&dune_ctx)
 	spawn_unit(&dune_ctx, 10, 10, .Player1); spawn_unit(&dune_ctx, 15, 10, .Player1); spawn_unit(&dune_ctx, 12, 10, .Player2)
