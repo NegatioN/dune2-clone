@@ -117,6 +117,13 @@ Entity :: struct {
 	current_dir: Direction,
 	path:        [dynamic]IVec2,
 	sight_radius: int,
+	
+	// Local Pathfinding (RVO)
+	velocity:    Vec2,
+	radius:      f32,
+	max_speed:   f32,
+	stuck_timer: f32,
+	is_static:   bool,
 
 	// Combat
 	hp:            int,
@@ -381,6 +388,9 @@ init_unit_stats :: proc(ctx: ^CTX, e: ^Entity, class: UnitClass) {
 	e.attack_range = 150.0
 	e.attack_speed = 1.0
 	e.sight_radius = 5
+	e.radius = 16.0
+	e.max_speed = 100.0
+	e.is_static = false
 
 	switch class {
 	case .Combat_Tank:
@@ -405,6 +415,7 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player, class: UnitClass = .Com
 	e.frame_idx = 0
 	e.current_dir = .Up
 	e.path = make([dynamic]IVec2)
+	e.velocity = {0, 0}
 	
 	init_unit_stats(ctx, e, class)
 	
@@ -420,6 +431,9 @@ init_building_stats :: proc(ctx: ^CTX, e: ^Entity, class: BuildingClass) {
 	e.damage = 0
 	e.attack_range = 0
 	e.sight_radius = 6
+	e.radius = 16.0
+	e.max_speed = 0.0
+	e.is_static = true
 
 	switch class {
 	case .Power_Plant:
@@ -459,134 +473,59 @@ spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player, class: BuildingClas
 
 update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 	prev_grid_pos := world_to_grid(e.pos)
-
-	// Combat Logic
 	if e.combat_target != nil {
-		// Validate Target (Simple/Slow check)
-		target_exists := false
-		for unit in ctx.entities {
-			if unit == e.combat_target {
-				target_exists = true
-				break
-			}
-		}
-		
-		if !target_exists {
-			e.combat_target = nil
-			e.state = .Idle
-		} else {
-			dist := linalg.distance(e.pos, e.combat_target.pos)
-			if dist <= e.attack_range {
-				// In Range - Attack
-				e.state = .Attacking
-				e.target_pos = e.pos // Stop moving
-				
-				// Face Target
-				// e.current_dir = ... (Logic for facing)
-				
-				e.attack_timer += dt
-				if e.attack_timer >= e.attack_speed {
-					e.attack_timer = 0
-					
-					// Spawn Projectile
-					p_dir := linalg.normalize(e.combat_target.pos - e.pos)
-					proj := Projectile{
-						owner = e.player,
-						pos = e.pos + {TILE_SIZE/2, TILE_SIZE/2},
-						dir = p_dir,
-						speed = 300.0,
-						damage = e.damage,
-						active = true,
-						target = e.combat_target,
-					}
-					append(&ctx.projectiles, proj)
-					log.info("Fired projectile")
-				}
-				// Even if attacking, we still want to finish the grid update logic below
-			} else {
-				// Move towards target
-				e.target_pos = e.combat_target.pos
-			}
-		}
+		exists := false
+		for u in ctx.entities { if u == e.combat_target { exists = true; break } }
+		if !exists { e.combat_target = nil } else { e.target_pos = e.combat_target.pos }
 	}
 
-	// Movement Logic
-	SPEED :: 100.0 // Pixels per second
-	dist := linalg.distance(e.pos, e.target_pos)
-	
-	if dist > 1.0 {
-		e.state = .Moving
-		dir := e.target_pos - e.pos
-		dir = linalg.normalize(dir)
-		
-		// Update Direction (8-way)
-		angle := math.atan2(dir.y, dir.x)
-		deg := math.to_degrees(angle)
-		if deg < 0 { deg += 360 }
-		
-		offset :: 22.5
-		if deg >= 360 - offset || deg < offset { e.current_dir = .Right }
-		else if deg < 45 + offset { e.current_dir = .DownRight }
-		else if deg < 90 + offset { e.current_dir = .Down }
-		else if deg < 135 + offset { e.current_dir = .DownLeft }
-		else if deg < 180 + offset { e.current_dir = .Left }
-		else if deg < 225 + offset { e.current_dir = .UpLeft }
-		else if deg < 270 + offset { e.current_dir = .Up }
-		else { e.current_dir = .UpRight }
-		
-		// Proposed movement
-		move_vec := dir * SPEED * dt
-		next_pos := e.pos + move_vec
-
-		// Collision Detection (AABB)
-		collided := false
-		for other in ctx.entities {
-			if other == e { continue }
-			if check_collision(next_pos, other.pos) {
-				collided = true
-				break
+	if e.type == .Unit {
+		pv, dist := Vec2{0,0}, linalg.distance(e.pos, e.target_pos)
+		if e.combat_target != nil && dist <= e.attack_range {
+			e.state, e.is_static = .Attacking, true
+			if e.attack_timer += dt; e.attack_timer >= e.attack_speed {
+				e.attack_timer = 0
+				append(&ctx.projectiles, Projectile{e.player, e.pos + 16, linalg.normalize(e.combat_target.pos - e.pos), 300, e.damage, true, e.combat_target})
 			}
-		}
-
-		if !collided {
-			e.pos = next_pos
-		}
-	} else {
-		e.pos = e.target_pos
-		if len(e.path) > 0 {
+		} else if dist > 30.0 {
+			e.is_static, pv = false, linalg.normalize(e.target_pos - e.pos) * e.max_speed
+		} else if len(e.path) > 0 {
 			ordered_remove(&e.path, 0)
-			if len(e.path) > 0 {
-				e.target_pos = Vec2{f32(e.path[0].x * TILE_SIZE), f32(e.path[0].y * TILE_SIZE)}
-			} else {
-				e.state = .Idle
-			}
-		} else {
-			e.state = .Idle
-		}
+			if len(e.path) > 0 { e.target_pos = Vec2{f32(e.path[0].x * 32), f32(e.path[0].y * 32)} }
+		} else { e.is_static = true }
+
+		for i in 0..<2 { e.velocity = solve_rvo(ctx, e, pv) }
+		if linalg.length(e.velocity) < 2.0 { e.velocity = {0,0} }
+		if linalg.length(e.velocity) > 5.0 {
+			e.state = .Moving
+			angle := math.atan2(e.velocity.y, e.velocity.x)
+			deg := math.to_degrees(angle) + (angle < 0 ? 360 : 0)
+			off :: 22.5
+			if deg >= 360 - off || deg < off { e.current_dir = .Right }
+			else if deg < 45 + off { e.current_dir = .DownRight }
+			else if deg < 90 + off { e.current_dir = .Down }
+			else if deg < 135 + off { e.current_dir = .DownLeft }
+			else if deg < 180 + off { e.current_dir = .Left }
+			else if deg < 225 + off { e.current_dir = .UpLeft }
+			else if deg < 270 + off { e.current_dir = .Up }
+			else { e.current_dir = .UpRight }
+		} else if e.state != .Attacking { e.state = .Idle }
+
+		e.pos += e.velocity * dt
+		resolve_collisions(e)
 	}
 
-	// Global Grid Ownership Update
 	new_grid_pos := world_to_grid(e.pos)
 	if new_grid_pos != prev_grid_pos {
-		// Clear old tile IF it still points to us
 		old_idx := prev_grid_pos.y * MAP_WIDTH + prev_grid_pos.x
-		if old_idx >= 0 && old_idx < len(game_map) && game_map[old_idx].occupier == e {
-			game_map[old_idx].occupier = nil
-		}
-
-		// Occupy new tile
+		if old_idx >= 0 && old_idx < len(game_map) && game_map[old_idx].occupier == e { game_map[old_idx].occupier = nil }
 		new_idx := new_grid_pos.y * MAP_WIDTH + new_grid_pos.x
-		if new_idx >= 0 && new_idx < len(game_map) {
-			game_map[new_idx].occupier = e
-		}
+		if new_idx >= 0 && new_idx < len(game_map) { game_map[new_idx].occupier = e }
 	}
-	
-	// Animation Tick
-	e.frame_timer += dt
-	if e.frame_timer >= e.anim_speed {
+	if e.frame_timer += dt; e.frame_timer >= e.anim_speed {
 		e.frame_timer = 0
-		_, num_frames := get_anim_info(e.state)
-		e.frame_idx = (e.frame_idx + 1) % num_frames
+		_, n := get_anim_info(e.state)
+		e.frame_idx = (e.frame_idx + 1) % n
 	}
 }
 
@@ -748,6 +687,7 @@ issue_attack_order :: proc(ctx: ^CTX, target: ^Entity) {
 		if unit == target { continue }
 		if unit.player == target.player { continue } // Prevent friendly fire
 		unit.combat_target = target
+		unit.is_static = false
 		clear(&unit.path)
 		// Reset target pos so it stops moving to previous location and focuses on target
 		// Logic in update_entity will handle moving to range
@@ -813,6 +753,7 @@ handle_movement :: proc(ctx: ^CTX, grid_pos: IVec2) {
 			unit.target_pos = Vec2{f32(unit.path[0].x * TILE_SIZE), f32(unit.path[0].y * TILE_SIZE)}
 			unit.combat_target = nil
 			unit.state = .Moving
+			unit.is_static = false
 			count += 1
 		}
 	}
