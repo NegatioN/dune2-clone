@@ -414,6 +414,8 @@ spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player) {
 }
 
 update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
+	prev_grid_pos := world_to_grid(e.pos)
+
 	// Combat Logic
 	if e.combat_target != nil {
 		// Validate Target (Simple/Slow check)
@@ -436,9 +438,7 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 				e.target_pos = e.pos // Stop moving
 				
 				// Face Target
-				dir := e.combat_target.pos - e.pos
-				// Reuse direction logic later? Or just set it here?
-				// For now, let's just fire.
+				// e.current_dir = ... (Logic for facing)
 				
 				e.attack_timer += dt
 				if e.attack_timer >= e.attack_speed {
@@ -458,7 +458,7 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 					append(&ctx.projectiles, proj)
 					log.info("Fired projectile")
 				}
-				return // Skip movement logic
+				// Even if attacking, we still want to finish the grid update logic below
 			} else {
 				// Move towards target
 				e.target_pos = e.combat_target.pos
@@ -466,11 +466,10 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 		}
 	}
 
-	// Simple movement logic: Lerp towards target
+	// Movement Logic
 	SPEED :: 100.0 // Pixels per second
-
-	prev_grid_pos := world_to_grid(e.pos)
 	dist := linalg.distance(e.pos, e.target_pos)
+	
 	if dist > 1.0 {
 		e.state = .Moving
 		dir := e.target_pos - e.pos
@@ -497,10 +496,8 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 
 		// Collision Detection (AABB)
 		collided := false
-		
 		for other in ctx.entities {
-			if other == e { continue } // Don't check against self
-			
+			if other == e { continue }
 			if check_collision(next_pos, other.pos) {
 				collided = true
 				break
@@ -509,27 +506,7 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 
 		if !collided {
 			e.pos = next_pos
-			
-			// Update logic grid position (ownership)
-			new_grid_pos := world_to_grid(e.pos)
-			
-			// If we crossed into a new tile
-			if new_grid_pos != prev_grid_pos {
-				// Bounds check
-				if new_grid_pos.x >= 0 && new_grid_pos.x < MAP_WIDTH && 
-				   new_grid_pos.y >= 0 && new_grid_pos.y < MAP_HEIGHT {
-					   
-					// Unconditionally clear the old tile to ensure no trails are left.
-					old_idx := prev_grid_pos.y * MAP_WIDTH + prev_grid_pos.x
-					game_map[old_idx].occupier = nil
-					
-					// Set new
-					new_idx := new_grid_pos.y * MAP_WIDTH + new_grid_pos.x
-					game_map[new_idx].occupier = e
-				}
-			}
 		}
-		
 	} else {
 		e.pos = e.target_pos
 		if len(e.path) > 0 {
@@ -541,6 +518,22 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 			}
 		} else {
 			e.state = .Idle
+		}
+	}
+
+	// Global Grid Ownership Update
+	new_grid_pos := world_to_grid(e.pos)
+	if new_grid_pos != prev_grid_pos {
+		// Clear old tile IF it still points to us
+		old_idx := prev_grid_pos.y * MAP_WIDTH + prev_grid_pos.x
+		if old_idx >= 0 && old_idx < len(game_map) && game_map[old_idx].occupier == e {
+			game_map[old_idx].occupier = nil
+		}
+
+		// Occupy new tile
+		new_idx := new_grid_pos.y * MAP_WIDTH + new_grid_pos.x
+		if new_idx >= 0 && new_idx < len(game_map) {
+			game_map[new_idx].occupier = e
 		}
 	}
 	
