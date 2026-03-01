@@ -68,6 +68,16 @@ EntityType :: enum {
 	Building,
 }
 
+UnitClass :: enum {
+	Combat_Tank,
+}
+
+BuildingClass :: enum {
+	None,
+	Power_Plant,
+	Barracks,
+}
+
 Tile :: struct {
 	terrain:  TerrainType,
 	tile_id:  int,      // Index in the tileset texture (Column N)
@@ -85,6 +95,8 @@ Entity :: struct {
 	// Identity
 	player:      Player,
 	type:        EntityType,
+	unit_class:  UnitClass,
+	building_class: BuildingClass,
 
 	// Spatial
 	pos:         Vec2,     // World position (pixels)
@@ -176,7 +188,6 @@ init_sdl :: proc(ctx: ^CTX) -> bool {
 		log.errorf("SDL2 Init failed: %s", sdl2.GetError())
 		return false
 	}
-// ... (rest of init_sdl is same) ...
 
 	init_flags := img.Init(img.INIT_PNG | img.INIT_JPG)
 	if .PNG not_in init_flags {
@@ -350,8 +361,26 @@ draw_map :: proc(ctx: ^CTX) {
 	}
 }
 
+init_unit_stats :: proc(ctx: ^CTX, e: ^Entity, class: UnitClass) {
+	e.unit_class = class
+	e.tex = ctx.units_tex
+	e.base_sprite_pos = IVec2{0, 0}
+	e.anim_speed = 0.1
+	e.hp = 100
+	e.max_hp = 100
+	e.damage = 10
+	e.attack_range = 150.0
+	e.attack_speed = 1.0
+	e.sight_radius = 5
+
+	switch class {
+	case .Combat_Tank:
+		// Default values already set
+	}
+}
+
 // --- Entities ---
-spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
+spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player, class: UnitClass = .Combat_Tank) {
 	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
 	
 	idx := y * MAP_WIDTH + x
@@ -362,28 +391,40 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	e.type = .Unit
 	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
 	e.target_pos = e.pos
-	e.tex = ctx.units_tex // Use the dedicated units texture
-	e.base_sprite_pos = IVec2{0, 0} // Reset base since we are using a dedicated sheet
+	
 	e.state = .Idle
 	e.frame_idx = 0
-	e.anim_speed = 0.1
 	e.current_dir = .Up
 	e.path = make([dynamic]IVec2)
-	e.sight_radius = 5
 	
-	// Combat Stats
-	e.hp = 100
-	e.max_hp = 100
-	e.damage = 10
-	e.attack_range = 150.0
-	e.attack_timer = 0.0
-	e.attack_speed = 1.0 // 1 second cooldown
+	init_unit_stats(ctx, e, class)
 	
 	game_map[idx].occupier = e
 	append(&ctx.entities, e)
 }
 
-spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player) {
+init_building_stats :: proc(ctx: ^CTX, e: ^Entity, class: BuildingClass) {
+	e.building_class = class
+	e.tex = ctx.tileset // Most buildings are in the tileset
+	e.hp = 500
+	e.max_hp = 500
+	e.damage = 0
+	e.attack_range = 0
+	e.sight_radius = 6
+
+	switch class {
+	case .Power_Plant:
+		e.base_sprite_pos = IVec2{13, 0}
+		e.hp, e.max_hp = 400, 400
+	case .Barracks:
+		e.base_sprite_pos = IVec2{15, 0}
+		e.hp, e.max_hp = 450, 450
+	case .None:
+		e.base_sprite_pos = IVec2{0, 0}
+	}
+}
+
+spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player, class: BuildingClass = .Construction_Yard) {
 	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
 	
 	idx := y * MAP_WIDTH + x
@@ -394,23 +435,17 @@ spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player) {
 	e.type = .Building
 	e.pos = Vec2{f32(x * TILE_SIZE), f32(y * TILE_SIZE)}
 	e.target_pos = e.pos
-	e.tex = ctx.tileset // Use tileset for buildings
-	e.base_sprite_pos = IVec2{12, 0}
 	e.state = .Idle
 	e.frame_idx = 0
 	e.anim_speed = 0.0
 	e.current_dir = .None // Indicates static building
 	e.path = make([dynamic]IVec2)
-	e.sight_radius = 6
 	
-	e.hp = 500
-	e.max_hp = 500
-	e.damage = 0
-	e.attack_range = 0
+	init_building_stats(ctx, e, class)
 	
 	game_map[idx].occupier = e
 	append(&ctx.entities, e)
-	log.info("Spawned Building at", x, y)
+	log.infof("Spawned %v at %d, %d", class, x, y)
 }
 
 update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
