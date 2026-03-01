@@ -52,6 +52,12 @@ TerrainType :: enum {
 	Spice,
 }
 
+FogStatus :: enum u8 {
+	Hidden,
+	Explored,
+	Visible,
+}
+
 Player :: enum {
 	Player1,
 	Player2,
@@ -98,6 +104,7 @@ Entity :: struct {
 	// Game Logic
 	current_dir: Direction,
 	path:        [dynamic]IVec2,
+	sight_radius: int,
 
 	// Combat
 	hp:            int,
@@ -142,6 +149,9 @@ CTX :: struct {
 	entities:          [dynamic]^Entity,
 	projectiles:       [dynamic]Projectile,
 	
+	// Fog of War
+	fog_map:           [MAP_WIDTH * MAP_HEIGHT]FogStatus,
+
 	// Selection State
 	is_dragging:       bool,
 	is_targeting:      bool, // Attack Move / Targeting mode
@@ -322,7 +332,21 @@ draw_map :: proc(ctx: ^CTX) {
 			h = TILE_SIZE,
 		}
 
-		sdl2.RenderCopy(ctx.renderer, ctx.tileset, &src, &dst)
+		// Apply Fog of War
+		idx := tile.pos.y * MAP_WIDTH + tile.pos.x
+		fog := ctx.fog_map[idx]
+		
+		if fog == .Hidden {
+			sdl2.SetRenderDrawColor(ctx.renderer, 0, 0, 0, 255)
+			sdl2.RenderFillRect(ctx.renderer, &dst)
+		} else {
+			if fog == .Explored {
+				sdl2.SetTextureColorMod(ctx.tileset, 100, 100, 100)
+			} else {
+				sdl2.SetTextureColorMod(ctx.tileset, 255, 255, 255)
+			}
+			sdl2.RenderCopy(ctx.renderer, ctx.tileset, &src, &dst)
+		}
 	}
 }
 
@@ -345,6 +369,7 @@ spawn_unit :: proc(ctx: ^CTX, x, y: int, player: Player) {
 	e.anim_speed = 0.1
 	e.current_dir = .Up
 	e.path = make([dynamic]IVec2)
+	e.sight_radius = 5
 	
 	// Combat Stats
 	e.hp = 100
@@ -376,6 +401,7 @@ spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player) {
 	e.anim_speed = 0.0
 	e.current_dir = .None // Indicates static building
 	e.path = make([dynamic]IVec2)
+	e.sight_radius = 6
 	
 	e.hp = 500
 	e.max_hp = 500
@@ -745,6 +771,13 @@ check_collision :: proc(pos_a, pos_b: Vec2) -> bool {
 }
 
 draw_entity :: proc(ctx: ^CTX, entity: ^Entity) {
+	// 0. Visibility check
+	grid_pos := world_to_grid(entity.pos)
+	idx := grid_pos.y * MAP_WIDTH + grid_pos.x
+	if entity.player != .Player1 && ctx.fog_map[idx] != .Visible {
+		return
+	}
+
 	// 1. Calculate Destination Rect (Screen Space)
 	screen_x := ctx.offset_x + i32(entity.pos.x)
 	screen_y := ctx.offset_y + i32(entity.pos.y)
@@ -910,6 +943,38 @@ update_projectiles :: proc(ctx: ^CTX, dt: f32) {
 	}
 }
 
+update_fog :: proc(ctx: ^CTX) {
+	// 1. Mark all Visible tiles as Explored
+	for i in 0..<len(ctx.fog_map) {
+		if ctx.fog_map[i] == .Visible {
+			ctx.fog_map[i] = .Explored
+		}
+	}
+
+	// 2. For each Player1 entity, mark surrounding tiles as Visible
+	for e in ctx.entities {
+		if e.player != .Player1 { continue }
+
+		grid_pos := world_to_grid(e.pos)
+		radius := e.sight_radius
+
+		for dy := -radius; dy <= radius; dy += 1 {
+			for dx := -radius; dx <= radius; dx += 1 {
+				// Circular sight check
+				if dx*dx + dy*dy <= radius*radius {
+					tx := grid_pos.x + i32(dx)
+					ty := grid_pos.y + i32(dy)
+
+					if tx >= 0 && tx < MAP_WIDTH && ty >= 0 && ty < MAP_HEIGHT {
+						idx := ty * MAP_WIDTH + tx
+						ctx.fog_map[idx] = .Visible
+					}
+				}
+			}
+		}
+	}
+}
+
 // --- Main Loop ---
 
 dune_ctx := CTX{}
@@ -971,6 +1036,7 @@ main :: proc() {
 		}
 		
 		update_projectiles(&dune_ctx, dt)
+		update_fog(&dune_ctx)
 		
 		// 2. Draw Entities (Render)
 		// Sort by Y for simple depth sorting
@@ -1073,9 +1139,13 @@ draw_minimap :: proc(ctx: ^CTX) {
 	
 	// 2. Draw Terrain & Units
 	for tile in game_map {
+		idx := tile.pos.y * MAP_WIDTH + tile.pos.x
+		fog := ctx.fog_map[idx]
+		if fog == .Hidden { continue }
+
 		// Color based on terrain or unit
 		r, g, b: u8
-		if tile.occupier != nil {
+		if tile.occupier != nil && (tile.occupier.player == .Player1 || fog == .Visible) {
 		// Color by player
 			switch tile.occupier.player {
 			case .Player1:  r, g, b = 0, 0, 255   // Blue
@@ -1086,6 +1156,10 @@ draw_minimap :: proc(ctx: ^CTX) {
 			case .Sand:  r, g, b = 194, 125, 60
 			case .Rock:  r, g, b = 80, 80, 80
 			case .Spice: r, g, b = 255, 140, 0
+			}
+			
+			if fog == .Explored {
+				r /= 2; g /= 2; b /= 2;
 			}
 		}
 
