@@ -148,6 +148,12 @@ get_anim_info :: proc(state: AnimState) -> (row_offset: i32, num_frames: int) {
 	return 0, 1
 }
 
+MenuState :: enum {
+	None,
+	Building,
+	Barracks,
+}
+
 // Game Context
 CTX :: struct {
 	window:       ^sdl2.Window,
@@ -163,6 +169,9 @@ CTX :: struct {
 	
 	// Fog of War
 	fog_map:           [MAP_WIDTH * MAP_HEIGHT]FogStatus,
+
+	// UI State
+	current_menu:      MenuState,
 
 	// Selection State
 	is_dragging:       bool,
@@ -414,17 +423,17 @@ init_building_stats :: proc(ctx: ^CTX, e: ^Entity, class: BuildingClass) {
 
 	switch class {
 	case .Power_Plant:
-		e.base_sprite_pos = IVec2{13, 0}
+		e.base_sprite_pos = IVec2{12, 0}
 		e.hp, e.max_hp = 400, 400
 	case .Barracks:
-		e.base_sprite_pos = IVec2{15, 0}
+		e.base_sprite_pos = IVec2{12, 2}
 		e.hp, e.max_hp = 450, 450
 	case .None:
 		e.base_sprite_pos = IVec2{0, 0}
 	}
 }
 
-spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player, class: BuildingClass = .Construction_Yard) {
+spawn_building :: proc(ctx: ^CTX, x, y: i32, player: Player, class: BuildingClass = .Power_Plant) {
 	if x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_HEIGHT { return }
 	
 	idx := y * MAP_WIDTH + x
@@ -583,6 +592,20 @@ update_entity :: proc(ctx: ^CTX, e: ^Entity, dt: f32) {
 
 // --- Main Input Handling ---
 
+find_spawn_pos :: proc(building_grid: IVec2) -> (IVec2, bool) {
+	// Look for adjacent traversable tiles to spawn unit
+	for dy := -1; dy <= 1; dy += 1 {
+		for dx := -1; dx <= 1; dx += 1 {
+			if dx == 0 && dy == 0 { continue }
+			target := building_grid + IVec2{i32(dx), i32(dy)}
+			if is_traversable(target) {
+				return target, true
+			}
+		}
+	}
+	return {0, 0}, false
+}
+
 handle_events :: proc(ctx: ^CTX) {
 	e: sdl2.Event
 	for sdl2.PollEvent(&e) {
@@ -591,20 +614,50 @@ handle_events :: proc(ctx: ^CTX) {
 			ctx.should_close = true
 		case .KEYDOWN:
 			if e.key.keysym.sym == .ESCAPE {
-				if ctx.is_targeting {
+				// Close menus first, but always allow exit if pressed again or if no menu
+				if ctx.current_menu != .None {
+					ctx.current_menu = .None
+					log.info("Menu Closed")
+				} else if ctx.is_targeting {
 					ctx.is_targeting = false
 					log.info("Targeting Cancelled")
 				} else {
 					ctx.should_close = true
+				}
+			} else if ctx.current_menu == .Building {
+				grid_pos := world_to_grid(ctx.current_mouse_pos)
+				#partial switch e.key.keysym.sym {
+				case .P: spawn_building(ctx, grid_pos.x, grid_pos.y, .Player1, .Power_Plant); ctx.current_menu = .None
+				case .B: spawn_building(ctx, grid_pos.x, grid_pos.y, .Player1, .Barracks);    ctx.current_menu = .None
+				}
+			} else if ctx.current_menu == .Barracks {
+				if e.key.keysym.sym == .T {
+					// Find the barracks that is selected
+					barracks: ^Entity
+					for sel in ctx.selected_entities {
+						if sel.type == .Building && sel.building_class == .Barracks {
+							barracks = sel
+							break
+						}
+					}
+					
+					if barracks != nil {
+						b_grid := world_to_grid(barracks.pos)
+						if spawn_pos, ok := find_spawn_pos(b_grid); ok {
+							spawn_unit(ctx, int(spawn_pos.x), int(spawn_pos.y), .Player1, .Combat_Tank)
+						} else {
+							log.info("No space around Barracks to spawn Tank!")
+						}
+					}
 				}
 			} else if e.key.keysym.sym == .A {
 				if len(ctx.selected_entities) > 0 {
 					ctx.is_targeting = true
 					log.info("Targeting Mode ON")
 				}
-			} else if e.key.keysym.sym == .G {
-				grid_pos := world_to_grid(ctx.current_mouse_pos)
-				spawn_building(ctx, grid_pos.x, grid_pos.y, .Player1)
+			} else if e.key.keysym.sym == .B {
+				ctx.current_menu = .Building
+				log.info("Building Menu Open")
 			}
 		case .MOUSEBUTTONDOWN:
 			world_pos := screen_to_world(ctx, e.button.x, e.button.y)
@@ -710,6 +763,14 @@ handle_single_selection :: proc(ctx: ^CTX, world_pos: Vec2) {
 	if unit != nil {
 		append(&ctx.selected_entities, unit)
 		log.info("Selected Unit via Click")
+		
+		if unit.type == .Building && unit.building_class == .Barracks {
+			ctx.current_menu = .Barracks
+		} else {
+			ctx.current_menu = .None
+		}
+	} else {
+		ctx.current_menu = .None
 	}
 }
 
@@ -726,6 +787,7 @@ handle_box_selection :: proc(ctx: ^CTX, start, end: Vec2) {
 		return
 	}
 
+	ctx.current_menu = .None
 	for unit in ctx.entities {
 		// Check if unit center is in box
 		center := unit.pos + Vec2{f32(TILE_SIZE)/2, f32(TILE_SIZE)/2}
@@ -1007,6 +1069,44 @@ update_fog :: proc(ctx: ^CTX) {
 
 dune_ctx := CTX{}
 
+draw_ui :: proc(ctx: ^CTX) {
+	if ctx.current_menu == .Building {
+		W :: 150
+		H :: 100
+		X :: WINDOW_WIDTH - W - 10
+		Y :: WINDOW_HEIGHT - H - 150 // Above minimap maybe? Or bottom right.
+		// Let's put it top right or something to avoid minimap
+		
+		ui_rect := sdl2.Rect{x = X, y = Y, w = W, h = H}
+		sdl2.SetRenderDrawColor(ctx.renderer, 50, 50, 50, 200)
+		sdl2.RenderFillRect(ctx.renderer, &ui_rect)
+		sdl2.SetRenderDrawColor(ctx.renderer, 255, 255, 255, 255)
+		sdl2.RenderDrawRect(ctx.renderer, &ui_rect)
+		
+		color := sdl2.Color{255, 255, 255, 255}
+		render_text(ctx, "BUILD MENU:", X + 5, Y + 5, color)
+		render_text(ctx, "[P] Power Plant", X + 5, Y + 30, color)
+		render_text(ctx, "[B] Barracks", X + 5, Y + 55, color)
+		render_text(ctx, "[ESC] Cancel", X + 5, Y + 80, color)
+	} else if ctx.current_menu == .Barracks {
+		W :: 150
+		H :: 75
+		X :: WINDOW_WIDTH - W - 10
+		Y :: WINDOW_HEIGHT - H - 150
+		
+		ui_rect := sdl2.Rect{x = X, y = Y, w = W, h = H}
+		sdl2.SetRenderDrawColor(ctx.renderer, 50, 50, 50, 200)
+		sdl2.RenderFillRect(ctx.renderer, &ui_rect)
+		sdl2.SetRenderDrawColor(ctx.renderer, 255, 255, 255, 255)
+		sdl2.RenderDrawRect(ctx.renderer, &ui_rect)
+		
+		color := sdl2.Color{255, 255, 255, 255}
+		render_text(ctx, "BARRACKS MENU:", X + 5, Y + 5, color)
+		render_text(ctx, "[T] Build Tank", X + 5, Y + 30, color)
+		render_text(ctx, "[ESC] Close", X + 5, Y + 55, color)
+	}
+}
+
 main :: proc() {
 	context.logger = log.create_console_logger()
 
@@ -1097,6 +1197,7 @@ main :: proc() {
 			draw_mouse_select_box(&dune_ctx)
 		}
 
+		draw_ui(&dune_ctx)
 		draw_minimap(&dune_ctx)
 		
 		sdl2.RenderPresent(dune_ctx.renderer)
